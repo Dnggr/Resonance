@@ -1,30 +1,39 @@
 import 'dart:io';
 import 'package:dio/dio.dart';
+import 'package:get/get.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
-import 'package:get/get.dart';
+import 'package:resonance/core/utils/media_scanner.dart';
 
-enum DownloadFormat { mp3, mp4, flac }
+enum DownloadFormat { mp3, flac, m4a }
 
-enum DownloadStatus { idle, searching, downloading, done, error }
+enum DownloadStatus { queued, connecting, downloading, converting, done, error }
 
 class DownloadTask {
   final String videoId;
   final String title;
+  final String author;
   final String thumbnail;
   final DownloadFormat format;
+
   RxDouble progress = 0.0.obs;
-  Rx<DownloadStatus> status = DownloadStatus.idle.obs;
+  RxString statusLabel = 'Queued'.obs;
+  RxString speed = ''.obs;
+  Rx<DownloadStatus> status = DownloadStatus.queued.obs;
   String? filePath;
   String? errorMessage;
+  DateTime startedAt = DateTime.now();
 
   DownloadTask({
     required this.videoId,
     required this.title,
+    required this.author,
     required this.thumbnail,
     required this.format,
   });
+
+  String get formatLabel => format.name.toUpperCase();
 }
 
 class DownloaderService extends GetxController {
@@ -32,143 +41,222 @@ class DownloaderService extends GetxController {
   final Dio _dio = Dio();
 
   RxList<Video> searchResults = <Video>[].obs;
-  RxList<DownloadTask> downloadQueue = <DownloadTask>[].obs;
-  Rx<DownloadStatus> searchStatus = DownloadStatus.idle.obs;
+  RxList<DownloadTask> activeDownloads = <DownloadTask>[].obs;
+  RxList<DownloadTask> completedDownloads = <DownloadTask>[].obs;
+
+  RxBool isSearching = false.obs;
   RxString searchError = ''.obs;
+
+  // Active count for badge
+  int get activeCount => activeDownloads
+      .where((t) =>
+          t.status.value == DownloadStatus.downloading ||
+          t.status.value == DownloadStatus.connecting ||
+          t.status.value == DownloadStatus.converting)
+      .length;
 
   // ─── Search ───────────────────────────────────────────────
   Future<void> searchMusic(String query) async {
     if (query.trim().isEmpty) return;
     searchResults.clear();
-    searchStatus.value = DownloadStatus.searching;
+    isSearching.value = true;
     searchError.value = '';
-
     try {
       final results = await _yt.search.search(query);
       searchResults.assignAll(results);
-      searchStatus.value = DownloadStatus.idle;
     } catch (e) {
-      searchStatus.value = DownloadStatus.error;
-      searchError.value = 'Search failed: ${e.toString()}';
+      searchError.value = 'Search failed. Check your internet connection.';
+    } finally {
+      isSearching.value = false;
     }
   }
 
-  // ─── Download ─────────────────────────────────────────────
-  Future<void> downloadTrack(Video video, DownloadFormat format) async {
+  // ─── Queue Download ───────────────────────────────────────
+  Future<void> queueDownload(Video video, DownloadFormat format) async {
+    // Prevent duplicate
+    final exists = activeDownloads
+        .any((t) => t.videoId == video.id.value && t.format == format);
+    if (exists) return;
+
     final task = DownloadTask(
       videoId: video.id.value,
       title: video.title,
+      author: video.author,
       thumbnail: video.thumbnails.mediumResUrl,
       format: format,
     );
-    downloadQueue.add(task);
-    task.status.value = DownloadStatus.downloading;
+    activeDownloads.add(task);
+    _processDownload(task); // fire-and-forget
+  }
 
+  Future<void> _processDownload(DownloadTask task) async {
     try {
-      // 1. Check & request storage permission
+      // Step 1: Permission
+      task.status.value = DownloadStatus.connecting;
+      task.statusLabel.value = 'Requesting permission...';
+
       final hasPermission = await _requestStoragePermission();
       if (!hasPermission) {
-        task.status.value = DownloadStatus.error;
-        task.errorMessage = 'Storage permission denied';
+        _failTask(task, 'Storage permission denied');
         return;
       }
 
-      // 2. Get the save directory
-      final saveDir = await _getMusicDirectory();
+      // Step 2: Connect & fetch stream info
+      task.statusLabel.value = 'Connecting to source...';
+      final manifest =
+          await _yt.videos.streamsClient.getManifest(VideoId(task.videoId));
 
-      // 3. Sanitize filename
-      final safeName = video.title
-          .replaceAll(RegExp(r'[\\/:*?"<>|]'), '_')
-          .substring(0, video.title.length.clamp(0, 80));
-      final ext = format == DownloadFormat.mp4 ? 'mp4' : 'mp3';
-      final filePath = '${saveDir.path}/$safeName.$ext';
-
-      if (format == DownloadFormat.mp4) {
-        await _downloadVideo(video.id, filePath, task);
-      } else {
-        await _downloadAudio(video.id, filePath, task);
+      // Audio-only streams
+      final audioStreams = manifest.audioOnly;
+      if (audioStreams.isEmpty) {
+        _failTask(task, 'No audio stream found');
+        return;
       }
 
+      // Pick best bitrate
+      final streamInfo = audioStreams.withHighestBitrate();
+      final totalBytes = streamInfo.size.totalBytes;
+      final bitrateKbps = (streamInfo.bitrate.bitsPerSecond / 1000).round();
+      task.statusLabel.value = 'Found stream · ${bitrateKbps}kbps';
+
+      await Future.delayed(const Duration(milliseconds: 400));
+
+      // Step 3: Prepare file path
+      final saveDir = await _getMusicDirectory();
+      final safeName = _sanitize(task.title);
+      final ext = _ext(task.format);
+      final filePath = '${saveDir.path}/$safeName.$ext';
+
+      // Step 4: Download
+      task.status.value = DownloadStatus.downloading;
+      task.statusLabel.value = 'Downloading...';
+
+      final stream = _yt.videos.streamsClient.get(streamInfo);
+      final file = File(filePath);
+      final sink = file.openWrite();
+      int downloaded = 0;
+      int lastBytes = 0;
+      DateTime lastTime = DateTime.now();
+
+      await for (final chunk in stream) {
+        sink.add(chunk);
+        downloaded += chunk.length;
+        task.progress.value = downloaded / totalBytes;
+
+        // Calculate speed every ~500ms
+        final now = DateTime.now();
+        final elapsed = now.difference(lastTime).inMilliseconds;
+        if (elapsed >= 500) {
+          final bytesPerSec = ((downloaded - lastBytes) / elapsed * 1000);
+          task.speed.value = _formatSpeed(bytesPerSec.round());
+          task.statusLabel.value =
+              'Downloading · ${task.speed.value} · ${_formatBytes(downloaded)}/${_formatBytes(totalBytes)}';
+          lastBytes = downloaded;
+          lastTime = now;
+        }
+      }
+      await sink.flush();
+      await sink.close();
+
+      // Step 5: Media scan (make visible to other apps)
+      task.status.value = DownloadStatus.converting;
+      task.statusLabel.value = 'Saving to library...';
+      await MediaScanner.scanFile(filePath);
+      await Future.delayed(const Duration(milliseconds: 500));
+
+      // Step 6: Done
       task.filePath = filePath;
       task.status.value = DownloadStatus.done;
+      task.statusLabel.value = 'Saved to Music folder ✓';
+      task.speed.value = '';
+      task.progress.value = 1.0;
+
+      // Move to completed list
+      activeDownloads.remove(task);
+      completedDownloads.insert(0, task);
     } catch (e) {
-      task.status.value = DownloadStatus.error;
-      task.errorMessage = e.toString();
+      _failTask(
+          task,
+          e.toString().length > 80
+              ? '${e.toString().substring(0, 80)}...'
+              : e.toString());
     }
   }
 
-  Future<void> _downloadAudio(
-      VideoId videoId, String filePath, DownloadTask task) async {
-    final manifest = await _yt.videos.streamsClient.getManifest(videoId);
-    final streamInfo = manifest.audioOnly.withHighestBitrate();
-    final stream = _yt.videos.streamsClient.get(streamInfo);
-
-    final file = File(filePath);
-    final sink = file.openWrite();
-    final totalBytes = streamInfo.size.totalBytes;
-    int downloaded = 0;
-
-    await for (final chunk in stream) {
-      sink.add(chunk);
-      downloaded += chunk.length;
-      task.progress.value = downloaded / totalBytes;
-    }
-    await sink.flush();
-    await sink.close();
+  void _failTask(DownloadTask task, String msg) {
+    task.status.value = DownloadStatus.error;
+    task.statusLabel.value = msg;
+    task.errorMessage = msg;
   }
 
-  Future<void> _downloadVideo(
-      VideoId videoId, String filePath, DownloadTask task) async {
-    final manifest = await _yt.videos.streamsClient.getManifest(videoId);
-    final streamInfo = manifest.muxed.withHighestBitrate();
-
-    final response = await _dio.download(
-      streamInfo.url.toString(),
-      filePath,
-      onReceiveProgress: (received, total) {
-        if (total > 0) task.progress.value = received / total;
-      },
-    );
-
-    if (response.statusCode != 200) {
-      throw Exception('Download failed: HTTP ${response.statusCode}');
-    }
+  // ─── Helpers ──────────────────────────────────────────────
+  String _ext(DownloadFormat f) {
+    return switch (f) {
+      DownloadFormat.mp3 => 'mp3',
+      DownloadFormat.flac => 'flac',
+      DownloadFormat.m4a => 'm4a',
+    };
   }
 
-  // ─── Permissions & Directory ──────────────────────────────
+  String _sanitize(String name) => name
+      .replaceAll(RegExp(r'[\\/:*?"<>|]'), '_')
+      .substring(0, name.length.clamp(0, 80));
+
+  String _formatSpeed(int bytesPerSec) {
+    if (bytesPerSec > 1024 * 1024) {
+      return '${(bytesPerSec / 1024 / 1024).toStringAsFixed(1)} MB/s';
+    } else if (bytesPerSec > 1024) {
+      return '${(bytesPerSec / 1024).toStringAsFixed(0)} KB/s';
+    }
+    return '$bytesPerSec B/s';
+  }
+
+  String _formatBytes(int bytes) {
+    if (bytes > 1024 * 1024)
+      return '${(bytes / 1024 / 1024).toStringAsFixed(1)}MB';
+    return '${(bytes / 1024).toStringAsFixed(0)}KB';
+  }
+
   Future<bool> _requestStoragePermission() async {
-    if (Platform.isAndroid) {
-      if (await Permission.audio.isGranted) return true;
-      final result = await Permission.audio.request();
-      if (result.isGranted) return true;
-      // Fallback for older Android
-      final legacy = await Permission.storage.request();
-      return legacy.isGranted;
-    }
-    return true;
+    if (!Platform.isAndroid) return true;
+    if (await Permission.audio.isGranted) return true;
+    final r = await Permission.audio.request();
+    if (r.isGranted) return true;
+    final r2 = await Permission.storage.request();
+    return r2.isGranted;
   }
 
   Future<Directory> _getMusicDirectory() async {
-    // Tries external Music folder first, falls back to app documents
     try {
-      final extDirs =
+      final dirs =
           await getExternalStorageDirectories(type: StorageDirectory.music);
-      if (extDirs != null && extDirs.isNotEmpty) {
-        final dir = extDirs.first;
-        if (!await dir.exists()) await dir.create(recursive: true);
-        return dir;
+      if (dirs != null && dirs.isNotEmpty) {
+        final d = dirs.first;
+        if (!await d.exists()) await d.create(recursive: true);
+        return d;
       }
     } catch (_) {}
-    // Fallback
-    final appDir = await getApplicationDocumentsDirectory();
-    final musicDir = Directory('${appDir.path}/Music');
-    if (!await musicDir.exists()) await musicDir.create(recursive: true);
-    return musicDir;
+    final app = await getApplicationDocumentsDirectory();
+    final d = Directory('${app.path}/Music');
+    if (!await d.exists()) await d.create(recursive: true);
+    return d;
   }
 
-  void removeFromQueue(DownloadTask task) => downloadQueue.remove(task);
-  void clearCompleted() =>
-      downloadQueue.removeWhere((t) => t.status.value == DownloadStatus.done);
+  void retryTask(DownloadTask task) {
+    activeDownloads.remove(task);
+    completedDownloads.remove(task);
+    final newTask = DownloadTask(
+      videoId: task.videoId,
+      title: task.title,
+      author: task.author,
+      thumbnail: task.thumbnail,
+      format: task.format,
+    );
+    activeDownloads.add(newTask);
+    _processDownload(newTask);
+  }
+
+  void clearCompleted() => completedDownloads.clear();
 
   @override
   void onClose() {

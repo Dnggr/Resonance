@@ -2,7 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'core/theme/app_theme.dart';
 import 'features/player/screens/player_screen.dart';
-import 'features/downloader/screens/downloader_screen.dart';
+import 'features/downloader/screens/search_screen.dart';
+import 'features/downloader/services/downloader_service.dart';
 
 void main() {
   runApp(const ResonanceApp());
@@ -30,32 +31,36 @@ class MainShell extends StatefulWidget {
 }
 
 class _MainShellState extends State<MainShell> {
-  int _currentIndex = 0;
+  int _index = 0;
+
+  // Init service globally so both screens share state
+  final DownloaderService _dlSvc = Get.put(DownloaderService());
 
   final List<Widget> _screens = const [
     PlayerScreen(),
-    DownloaderScreen(),
+    SearchScreen(),
   ];
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: _screens[_currentIndex],
+      body: _screens[_index],
       bottomNavigationBar: NavigationBar(
         backgroundColor: AppTheme.surface,
-        selectedIndex: _currentIndex,
+        selectedIndex: _index,
         indicatorColor: AppTheme.primary.withOpacity(0.2),
-        onDestinationSelected: (i) => setState(() => _currentIndex = i),
+        onDestinationSelected: (i) => setState(() => _index = i),
         destinations: const [
           NavigationDestination(
-            icon: Icon(Icons.queue_music_outlined),
-            selectedIcon: Icon(Icons.queue_music, color: AppTheme.primary),
-            label: 'Player',
+            icon: Icon(Icons.library_music_outlined),
+            selectedIcon:
+                Icon(Icons.library_music_rounded, color: AppTheme.primary),
+            label: 'Library',
           ),
           NavigationDestination(
-            icon: Icon(Icons.download_outlined),
-            selectedIcon: Icon(Icons.download, color: AppTheme.primary),
-            label: 'Download',
+            icon: Icon(Icons.search_rounded),
+            selectedIcon: Icon(Icons.search_rounded, color: AppTheme.primary),
+            label: 'Search',
           ),
         ],
       ),
