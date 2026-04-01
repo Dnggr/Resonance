@@ -108,9 +108,9 @@ class _DownloadTile extends StatelessWidget {
       final status = task.status.value;
       final isDone = status == DownloadStatus.done;
       final isError = status == DownloadStatus.error;
+      final isPaused = status == DownloadStatus.paused;
       final isActive = status == DownloadStatus.downloading ||
-          status == DownloadStatus.connecting ||
-          status == DownloadStatus.converting;
+          status == DownloadStatus.connecting;
 
       return Container(
         margin: const EdgeInsets.only(bottom: 10),
@@ -122,9 +122,11 @@ class _DownloadTile extends StatelessWidget {
                 ? Colors.greenAccent.withOpacity(0.25)
                 : isError
                     ? AppTheme.accent.withOpacity(0.25)
-                    : isActive
-                        ? AppTheme.primary.withOpacity(0.25)
-                        : Colors.white.withValues(alpha: 0.08),
+                    : isPaused
+                        ? Colors.orangeAccent.withOpacity(0.2)
+                        : isActive
+                            ? AppTheme.primary.withOpacity(0.25)
+                            : Colors.white.withValues(alpha: 0.08),
             width: 1,
           ),
         ),
@@ -191,12 +193,15 @@ class _DownloadTile extends StatelessWidget {
               const SizedBox(height: 10),
 
               // ── Progress bar ──────────────────────────
-              if (isActive || isDone) ...[
+              if (isActive || isDone || isPaused) ...[
                 LinearProgressIndicator(
                   value: task.progress.value,
                   backgroundColor: Colors.white10,
-                  valueColor: AlwaysStoppedAnimation<Color>(
-                      isDone ? Colors.greenAccent : AppTheme.primary),
+                  valueColor: AlwaysStoppedAnimation<Color>(isDone
+                      ? Colors.greenAccent
+                      : isPaused
+                          ? Colors.orangeAccent
+                          : AppTheme.primary),
                   borderRadius: BorderRadius.circular(4),
                   minHeight: 3,
                 ),
@@ -215,7 +220,9 @@ class _DownloadTile extends StatelessWidget {
                           ? Colors.greenAccent
                           : isError
                               ? AppTheme.accent
-                              : Colors.white54,
+                              : isPaused
+                                  ? Colors.orangeAccent
+                                  : Colors.white54,
                       fontSize: 11,
                     ),
                     maxLines: 1,
@@ -229,6 +236,45 @@ class _DownloadTile extends StatelessWidget {
                         color: AppTheme.primary,
                         fontSize: 11,
                         fontWeight: FontWeight.bold),
+                  ),
+                if (isActive)
+                  GestureDetector(
+                    onTap: () => svc.pauseTask(task),
+                    child: Container(
+                      margin: const EdgeInsets.only(left: 8),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.08),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.white12),
+                      ),
+                      child: const Text('Pause',
+                          style: TextStyle(
+                              color: Colors.white54,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600)),
+                    ),
+                  ),
+                if (isPaused)
+                  GestureDetector(
+                    onTap: () => svc.resumeTask(task),
+                    child: Container(
+                      margin: const EdgeInsets.only(left: 8),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: AppTheme.primary.withOpacity(0.15),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                            color: AppTheme.primary.withOpacity(0.3)),
+                      ),
+                      child: const Text('Resume',
+                          style: TextStyle(
+                              color: AppTheme.primary,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600)),
+                    ),
                   ),
                 if (isError)
                   GestureDetector(
@@ -270,11 +316,8 @@ class _DownloadTile extends StatelessWidget {
           height: 12,
           child: CircularProgressIndicator(
               strokeWidth: 1.5, color: AppTheme.primary)),
-      DownloadStatus.converting => const SizedBox(
-          width: 12,
-          height: 12,
-          child: CircularProgressIndicator(
-              strokeWidth: 1.5, color: Colors.purpleAccent)),
+      DownloadStatus.paused => const Icon(Icons.pause_circle_outline_rounded,
+          color: Colors.orangeAccent, size: 13),
       DownloadStatus.done => const Icon(Icons.check_circle_rounded,
           color: Colors.greenAccent, size: 13),
       DownloadStatus.error =>

@@ -1,12 +1,13 @@
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
+import 'package:just_audio/just_audio.dart';
 import '../../../core/theme/app_theme.dart';
 import '../services/downloader_service.dart';
 import 'downloads_screen.dart';
 
 class SearchScreen extends StatefulWidget {
   const SearchScreen({super.key});
-
   @override
   State<SearchScreen> createState() => _SearchScreenState();
 }
@@ -14,13 +15,39 @@ class SearchScreen extends StatefulWidget {
 class _SearchScreenState extends State<SearchScreen> {
   final DownloaderService _svc = Get.find<DownloaderService>();
   final TextEditingController _ctrl = TextEditingController();
-  final FocusNode _focus = FocusNode();
+
+  // Preview player
+  final AudioPlayer _preview = AudioPlayer();
+  String? _previewingId;
+  bool _previewLoading = false;
 
   @override
   void dispose() {
     _ctrl.dispose();
-    _focus.dispose();
+    _preview.dispose();
     super.dispose();
+  }
+
+  Future<void> _togglePreview(String videoId) async {
+    if (_previewingId == videoId && _preview.playing) {
+      await _preview.pause();
+      setState(() => _previewingId = null);
+      return;
+    }
+    setState(() {
+      _previewLoading = true;
+      _previewingId = videoId;
+    });
+    try {
+      final url = await _svc.getPreviewUrl(videoId);
+      if (url == null) throw Exception('No stream');
+      await _preview.setUrl(url);
+      await _preview.play();
+    } catch (_) {
+      setState(() => _previewingId = null);
+    } finally {
+      setState(() => _previewLoading = false);
+    }
   }
 
   @override
@@ -29,7 +56,6 @@ class _SearchScreenState extends State<SearchScreen> {
       backgroundColor: AppTheme.background,
       body: SafeArea(
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             _buildHeader(),
             _buildSearchBar(),
@@ -47,67 +73,57 @@ class _SearchScreenState extends State<SearchScreen> {
       child: Row(
         children: [
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text('Search',
-                    style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 28,
-                        fontWeight: FontWeight.bold,
-                        letterSpacing: -0.5)),
-                Text('Find & download audio',
-                    style: TextStyle(color: Colors.white38, fontSize: 13)),
-              ],
-            ),
+            child:
+                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('Search',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 28,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: -0.5)),
+              const Text('Preview & download audio',
+                  style: TextStyle(color: Colors.white38, fontSize: 13)),
+            ]),
           ),
-          // Downloads button with badge
           Obx(() {
             final active = _svc.activeDownloads.length;
-            final completed = _svc.completedDownloads.length;
-            final total = active + completed;
+            final total = active + _svc.completedDownloads.length;
             return GestureDetector(
               onTap: () => Get.to(() => const DownloadsScreen()),
               child: Container(
                 padding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                 decoration: BoxDecoration(
                   color: AppTheme.surface,
-                  borderRadius: BorderRadius.circular(12),
+                  borderRadius: BorderRadius.circular(10),
                   border: Border.all(
-                    color: active > 0
-                        ? AppTheme.primary.withOpacity(0.6)
-                        : Colors.white10,
-                  ),
+                      color: active > 0
+                          ? AppTheme.primary.withOpacity(0.5)
+                          : Colors.white10),
                 ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (active > 0)
-                      const SizedBox(
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  if (active > 0)
+                    const SizedBox(
                         width: 12,
                         height: 12,
                         child: CircularProgressIndicator(
-                            strokeWidth: 2, color: AppTheme.primary),
-                      )
-                    else
-                      const Icon(Icons.download_done_rounded,
-                          color: Colors.white54, size: 16),
-                    const SizedBox(width: 6),
-                    Text(
-                      active > 0
-                          ? '$active downloading'
-                          : total > 0
-                              ? '$total saved'
-                              : 'Downloads',
-                      style: TextStyle(
+                            strokeWidth: 2, color: AppTheme.primary))
+                  else
+                    const Icon(Icons.download_done_rounded,
+                        color: Colors.white54, size: 14),
+                  const SizedBox(width: 6),
+                  Text(
+                    active > 0
+                        ? '$active active'
+                        : total > 0
+                            ? '$total done'
+                            : 'Downloads',
+                    style: TextStyle(
                         color: active > 0 ? AppTheme.primary : Colors.white54,
                         fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
-                ),
+                        fontWeight: FontWeight.w600),
+                  ),
+                ]),
               ),
             );
           }),
@@ -124,7 +140,6 @@ class _SearchScreenState extends State<SearchScreen> {
           Expanded(
             child: TextField(
               controller: _ctrl,
-              focusNode: _focus,
               style: const TextStyle(color: Colors.white, fontSize: 15),
               decoration: InputDecoration(
                 hintText: 'Artist, song, album...',
@@ -135,11 +150,10 @@ class _SearchScreenState extends State<SearchScreen> {
                     ? const Padding(
                         padding: EdgeInsets.all(12),
                         child: SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(
-                              strokeWidth: 2, color: AppTheme.primary),
-                        ))
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                                strokeWidth: 2, color: AppTheme.primary)))
                     : _ctrl.text.isNotEmpty
                         ? IconButton(
                             icon: const Icon(Icons.clear,
@@ -148,24 +162,17 @@ class _SearchScreenState extends State<SearchScreen> {
                               _ctrl.clear();
                               _svc.searchResults.clear();
                               setState(() {});
-                            },
-                          )
+                            })
                         : const SizedBox.shrink()),
                 filled: true,
                 fillColor: AppTheme.surface,
                 border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(14),
-                  borderSide: BorderSide.none,
-                ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(14),
-                  borderSide: BorderSide(color: Colors.white10),
-                ),
+                    borderRadius: BorderRadius.circular(14),
+                    borderSide: BorderSide.none),
                 focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(14),
-                  borderSide:
-                      const BorderSide(color: AppTheme.primary, width: 1.5),
-                ),
+                    borderRadius: BorderRadius.circular(14),
+                    borderSide:
+                        const BorderSide(color: AppTheme.primary, width: 1.5)),
                 contentPadding: const EdgeInsets.symmetric(vertical: 14),
               ),
               onChanged: (_) => setState(() {}),
@@ -179,9 +186,8 @@ class _SearchScreenState extends State<SearchScreen> {
               width: 48,
               height: 48,
               decoration: BoxDecoration(
-                color: AppTheme.primary,
-                borderRadius: BorderRadius.circular(14),
-              ),
+                  color: AppTheme.primary,
+                  borderRadius: BorderRadius.circular(14)),
               child: const Icon(Icons.search_rounded, color: Colors.white),
             ),
           ),
@@ -204,12 +210,103 @@ class _SearchScreenState extends State<SearchScreen> {
         if (_svc.searchResults.isEmpty) {
           return _empty(Icons.music_note_rounded, 'Search for music above');
         }
-
         return ListView.builder(
           padding: const EdgeInsets.only(top: 8, bottom: 24),
           itemCount: _svc.searchResults.length,
-          itemBuilder: (_, i) =>
-              _SearchResultTile(video: _svc.searchResults[i]),
+          itemBuilder: (_, i) {
+            final video = _svc.searchResults[i];
+            final isPreviewingThis = _previewingId == video.id.value;
+            return Container(
+              margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
+              decoration: BoxDecoration(
+                color: AppTheme.surface,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(
+                  color: isPreviewingThis
+                      ? AppTheme.primary.withOpacity(0.5)
+                      : Colors.white.withValues(alpha: 0.08),
+                ),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(10),
+                child: Row(
+                  children: [
+                    // Thumbnail with preview overlay
+                    Stack(
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(8),
+                          child: CachedNetworkImage(
+                            imageUrl: video.thumbnails.lowResUrl,
+                            width: 56,
+                            height: 56,
+                            fit: BoxFit.cover,
+                            placeholder: (_, __) => Container(
+                                width: 56, height: 56, color: Colors.white10),
+                            errorWidget: (_, __, ___) => Container(
+                                width: 56,
+                                height: 56,
+                                color: Colors.white10,
+                                child: const Icon(Icons.music_note,
+                                    color: Colors.white30, size: 24)),
+                          ),
+                        ),
+                        // Preview button overlay
+                        Positioned.fill(
+                          child: GestureDetector(
+                            onTap: () => _togglePreview(video.id.value),
+                            child: Container(
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(8),
+                                color: isPreviewingThis
+                                    ? Colors.black45
+                                    : Colors.black26,
+                              ),
+                              child: _previewLoading && isPreviewingThis
+                                  ? const Center(
+                                      child: SizedBox(
+                                          width: 20,
+                                          height: 20,
+                                          child: CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                              color: Colors.white)))
+                                  : Icon(
+                                      isPreviewingThis && _preview.playing
+                                          ? Icons.pause_rounded
+                                          : Icons.play_arrow_rounded,
+                                      color: Colors.white,
+                                      size: 24),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(video.title,
+                                style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600),
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis),
+                            const SizedBox(height: 3),
+                            Text('${video.author} · ${_dur(video.duration)}',
+                                style: const TextStyle(
+                                    color: Colors.white38, fontSize: 11)),
+                          ]),
+                    ),
+                    const SizedBox(width: 8),
+                    _FormatPicker(
+                        onSelected: (fmt) => _svc.queueDownload(video, fmt)),
+                  ],
+                ),
+              ),
+            );
+          },
         );
       }),
     );
@@ -224,76 +321,6 @@ class _SearchScreenState extends State<SearchScreen> {
             style: TextStyle(color: color ?? Colors.white30, fontSize: 14),
             textAlign: TextAlign.center),
       ]),
-    );
-  }
-}
-
-// ─── Search Result Tile ───────────────────────────────────────
-class _SearchResultTile extends StatelessWidget {
-  final dynamic video;
-  const _SearchResultTile({required this.video});
-
-  @override
-  Widget build(BuildContext context) {
-    final svc = Get.find<DownloaderService>();
-
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
-      decoration: BoxDecoration(
-        color: AppTheme.surface,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(10),
-        child: Row(
-          children: [
-            // Thumbnail
-            ClipRRect(
-              borderRadius: BorderRadius.circular(8),
-              child: Image.network(
-                video.thumbnails.lowResUrl,
-                width: 56,
-                height: 56,
-                fit: BoxFit.cover,
-                errorBuilder: (_, __, ___) => Container(
-                  width: 56,
-                  height: 56,
-                  color: Colors.white10,
-                  child: const Icon(Icons.music_note,
-                      color: Colors.white30, size: 24),
-                ),
-              ),
-            ),
-            const SizedBox(width: 12),
-            // Info
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(video.title,
-                      style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600),
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis),
-                  const SizedBox(height: 3),
-                  Text(
-                    '${video.author} · ${_dur(video.duration)}',
-                    style: const TextStyle(color: Colors.white38, fontSize: 11),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: 8),
-            // Download format picker
-            _FormatPicker(
-              onSelected: (fmt) => svc.queueDownload(video, fmt),
-            ),
-          ],
-        ),
-      ),
     );
   }
 
@@ -334,11 +361,9 @@ class _FormatPicker extends StatelessWidget {
         ]),
       ),
       itemBuilder: (_) => [
-        _item(DownloadFormat.mp3, 'MP3', 'Universal compatibility',
-            Colors.greenAccent),
+        _item(DownloadFormat.mp3, 'MP3', 'Universal', Colors.greenAccent),
         _item(DownloadFormat.m4a, 'M4A', 'High quality AAC', Colors.blueAccent),
-        _item(
-            DownloadFormat.flac, 'FLAC', 'Lossless audio', Colors.purpleAccent),
+        _item(DownloadFormat.flac, 'FLAC', 'Lossless', Colors.purpleAccent),
       ],
     );
   }
@@ -352,9 +377,8 @@ class _FormatPicker extends StatelessWidget {
           width: 36,
           height: 36,
           decoration: BoxDecoration(
-            color: color.withOpacity(0.15),
-            borderRadius: BorderRadius.circular(8),
-          ),
+              color: color.withOpacity(0.15),
+              borderRadius: BorderRadius.circular(8)),
           child: Center(
               child: Text(label,
                   style: TextStyle(

@@ -1,210 +1,47 @@
-import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
-import 'package:just_audio/just_audio.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:permission_handler/permission_handler.dart';
 import '../../../core/theme/app_theme.dart';
+import '../controllers/player_controller.dart';
+import 'now_playing_screen.dart';
+import '../../playlist/screens/playlist_screen.dart';
 
-class SongFile {
-  final String path;
-  final String name;
-  final String ext;
-  SongFile({required this.path, required this.name, required this.ext});
-}
-
-class PlayerController extends GetxController {
-  final AudioPlayer player = AudioPlayer();
-  RxList<SongFile> songs = <SongFile>[].obs;
-  RxInt currentIndex = (-1).obs;
-  RxBool isPlaying = false.obs;
-  RxBool isLoading = false.obs;
-  Rx<Duration> position = Duration.zero.obs;
-  Rx<Duration> duration = Duration.zero.obs;
-  RxString error = ''.obs;
-
-  @override
-  void onInit() {
-    super.onInit();
-    player.positionStream.listen((p) => position.value = p);
-    player.durationStream.listen((d) => duration.value = d ?? Duration.zero);
-    player.playingStream.listen((p) => isPlaying.value = p);
-    player.processingStateStream.listen((s) {
-      if (s == ProcessingState.completed) _playNext();
-    });
-    loadSongs();
-  }
-
-  Future<void> loadSongs() async {
-    isLoading.value = true;
-    error.value = '';
-    final found = <SongFile>[];
-
-    try {
-      await _requestPermissions();
-
-      // Scan all possible music directories
-      final dirs = await _getMusicDirs();
-      for (final dir in dirs) {
-        await _scanDir(dir, found);
-      }
-
-      // Sort alphabetically
-      found.sort((a, b) => a.name.compareTo(b.name));
-      songs.assignAll(found);
-    } catch (e) {
-      error.value = 'Could not load songs: $e';
-    } finally {
-      isLoading.value = false;
-    }
-  }
-
-  Future<void> _scanDir(Directory dir, List<SongFile> found) async {
-    if (!await dir.exists()) return;
-    final supportedExts = {
-      '.mp3',
-      '.flac',
-      '.m4a',
-      '.aac',
-      '.ogg',
-      '.wav',
-      '.mp4'
-    };
-    try {
-      await for (final entity in dir.list(recursive: true)) {
-        if (entity is File) {
-          final lower = entity.path.toLowerCase();
-          for (final ext in supportedExts) {
-            if (lower.endsWith(ext)) {
-              final name = entity.path.split('/').last.replaceAll(
-                  RegExp(r'\.(mp3|flac|m4a|aac|ogg|wav|mp4)$',
-                      caseSensitive: false),
-                  '');
-              found.add(SongFile(
-                  path: entity.path,
-                  name: name,
-                  ext: ext.replaceFirst('.', '')));
-              break;
-            }
-          }
-        }
-      }
-    } catch (_) {}
-  }
-
-  Future<List<Directory>> _getMusicDirs() async {
-    final dirs = <Directory>[];
-
-    // 1. App's own Music folder (from downloader)
-    try {
-      final appDirs =
-          await getExternalStorageDirectories(type: StorageDirectory.music);
-      if (appDirs != null) dirs.addAll(appDirs);
-    } catch (_) {}
-
-    // 2. Standard Music folder
-    try {
-      final ext = await getExternalStorageDirectory();
-      if (ext != null) {
-        // Navigate to /storage/emulated/0/Music
-        final parts = ext.path.split('/');
-        final rootIdx = parts.indexOf('Android');
-        if (rootIdx > 0) {
-          final root = parts.sublist(0, rootIdx).join('/');
-          dirs.add(Directory('$root/Music'));
-          dirs.add(Directory('$root/Download'));
-        }
-      }
-    } catch (_) {}
-
-    // 3. App documents fallback
-    try {
-      final app = await getApplicationDocumentsDirectory();
-      dirs.add(Directory('${app.path}/Music'));
-    } catch (_) {}
-
-    return dirs;
-  }
-
-  Future<void> _requestPermissions() async {
-    await Permission.audio.request();
-    await Permission.storage.request();
-  }
-
-  Future<void> playSong(int index) async {
-    if (index < 0 || index >= songs.length) return;
-    currentIndex.value = index;
-    try {
-      await player.setFilePath(songs[index].path);
-      await player.play();
-    } catch (e) {
-      error.value = 'Cannot play: ${songs[index].name}';
-    }
-  }
-
-  void _playNext() {
-    final next = (currentIndex.value + 1) % songs.length;
-    playSong(next);
-  }
-
-  void playNext() => _playNext();
-
-  void playPrev() {
-    final prev =
-        currentIndex.value <= 0 ? songs.length - 1 : currentIndex.value - 1;
-    playSong(prev);
-  }
-
-  void togglePlay() {
-    if (player.playing) {
-      player.pause();
-    } else {
-      player.play();
-    }
-  }
-
-  void seek(double value) {
-    player.seek(Duration(seconds: value.toInt()));
-  }
-
-  @override
-  void onClose() {
-    player.dispose();
-    super.onClose();
-  }
-}
-
-// ─── Player Screen ────────────────────────────────────────────
-class PlayerScreen extends StatelessWidget {
+class PlayerScreen extends StatefulWidget {
   const PlayerScreen({super.key});
+  @override
+  State<PlayerScreen> createState() => _PlayerScreenState();
+}
+
+class _PlayerScreenState extends State<PlayerScreen> {
+  final TextEditingController _searchCtrl = TextEditingController();
+
+  @override
+  void dispose() {
+    _searchCtrl.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    final ctrl = Get.put(PlayerController());
-
+    final ctrl = Get.find<PlayerController>();
     return Scaffold(
       backgroundColor: AppTheme.background,
       body: SafeArea(
         child: Column(
           children: [
-            _Header(ctrl: ctrl),
-            Expanded(child: _SongList(ctrl: ctrl)),
+            _buildHeader(ctrl),
+            _buildSearchBar(ctrl),
+            const SizedBox(height: 4),
+            Expanded(child: _buildSongList(ctrl)),
             _MiniPlayer(ctrl: ctrl),
           ],
         ),
       ),
     );
   }
-}
 
-class _Header extends StatelessWidget {
-  final PlayerController ctrl;
-  const _Header({required this.ctrl});
-
-  @override
-  Widget build(BuildContext context) {
+  Widget _buildHeader(PlayerController ctrl) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
+      padding: const EdgeInsets.fromLTRB(20, 20, 16, 10),
       child: Row(
         children: [
           Expanded(
@@ -221,114 +58,143 @@ class _Header extends StatelessWidget {
             ]),
           ),
           IconButton(
-            onPressed: ctrl.loadSongs,
+            icon:
+                const Icon(Icons.playlist_play_rounded, color: Colors.white54),
+            tooltip: 'Playlists',
+            onPressed: () => Get.to(() => const PlaylistScreen()),
+          ),
+          IconButton(
             icon: const Icon(Icons.refresh_rounded, color: Colors.white54),
-            tooltip: 'Refresh library',
+            onPressed: ctrl.loadSongs,
           ),
         ],
       ),
     );
   }
-}
 
-class _SongList extends StatelessWidget {
-  final PlayerController ctrl;
-  const _SongList({required this.ctrl});
+  Widget _buildSearchBar(PlayerController ctrl) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: TextField(
+        controller: _searchCtrl,
+        style: const TextStyle(color: Colors.white, fontSize: 14),
+        decoration: InputDecoration(
+          hintText: 'Search songs...',
+          hintStyle: const TextStyle(color: Colors.white30),
+          prefixIcon:
+              const Icon(Icons.search_rounded, color: Colors.white38, size: 20),
+          suffixIcon: Obx(() => ctrl.searchQuery.value.isNotEmpty
+              ? IconButton(
+                  icon:
+                      const Icon(Icons.clear, color: Colors.white38, size: 18),
+                  onPressed: () {
+                    _searchCtrl.clear();
+                    ctrl.filterSongs('');
+                  },
+                )
+              : const SizedBox.shrink()),
+          filled: true,
+          fillColor: AppTheme.surface,
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide.none,
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: const BorderSide(color: AppTheme.primary, width: 1),
+          ),
+          contentPadding: const EdgeInsets.symmetric(vertical: 12),
+        ),
+        onChanged: ctrl.filterSongs,
+      ),
+    );
+  }
 
-  @override
-  Widget build(BuildContext context) {
+  Widget _buildSongList(PlayerController ctrl) {
     return Obx(() {
       if (ctrl.isLoading.value) {
         return const Center(
           child: Column(mainAxisSize: MainAxisSize.min, children: [
             CircularProgressIndicator(color: AppTheme.primary),
             SizedBox(height: 16),
-            Text('Scanning music library...',
+            Text('Scanning library...',
                 style: TextStyle(color: Colors.white38)),
           ]),
         );
       }
-
-      if (ctrl.songs.isEmpty) {
+      if (ctrl.filteredSongs.isEmpty) {
         return Center(
           child: Column(mainAxisSize: MainAxisSize.min, children: [
-            const Icon(Icons.library_music_rounded,
-                size: 64, color: Colors.white12),
+            Icon(
+                ctrl.songs.isEmpty
+                    ? Icons.library_music_rounded
+                    : Icons.search_off_rounded,
+                size: 56,
+                color: Colors.white12),
             const SizedBox(height: 12),
-            const Text('No music found',
-                style: TextStyle(color: Colors.white54, fontSize: 16)),
-            const SizedBox(height: 6),
-            const Text('Download songs or copy to Music folder',
-                style: TextStyle(color: Colors.white30, fontSize: 13)),
-            const SizedBox(height: 20),
-            ElevatedButton.icon(
-              onPressed: ctrl.loadSongs,
-              icon: const Icon(Icons.refresh_rounded, size: 18),
-              label: const Text('Retry'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: AppTheme.primary,
-                foregroundColor: Colors.white,
+            Text(ctrl.songs.isEmpty ? 'No music found' : 'No results',
+                style: const TextStyle(color: Colors.white54, fontSize: 16)),
+            if (ctrl.songs.isEmpty) ...[
+              const SizedBox(height: 6),
+              const Text('Download songs or copy to Music folder',
+                  style: TextStyle(color: Colors.white30, fontSize: 13)),
+              const SizedBox(height: 20),
+              ElevatedButton.icon(
+                onPressed: ctrl.loadSongs,
+                icon: const Icon(Icons.refresh_rounded, size: 18),
+                label: const Text('Retry'),
+                style: ElevatedButton.styleFrom(
+                    backgroundColor: AppTheme.primary,
+                    foregroundColor: Colors.white),
               ),
-            ),
+            ],
           ]),
         );
       }
 
       return ListView.builder(
-        padding: const EdgeInsets.only(bottom: 8),
-        itemCount: ctrl.songs.length,
+        itemCount: ctrl.filteredSongs.length,
+        itemExtent: 68, // fixed height = no layout recalc = fast scroll
         itemBuilder: (_, i) {
-          final song = ctrl.songs[i];
+          final song = ctrl.filteredSongs[i];
           return Obx(() {
-            final isCurrent = ctrl.currentIndex.value == i;
+            final realIdx = ctrl.songs.indexWhere((s) => s.path == song.path);
+            final isCurrent = ctrl.currentIndex.value == realIdx;
             return ListTile(
               contentPadding:
                   const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
               leading: Container(
-                width: 44,
-                height: 44,
+                width: 40,
+                height: 40,
                 decoration: BoxDecoration(
                   color: isCurrent
                       ? AppTheme.primary.withOpacity(0.2)
                       : Colors.white.withValues(alpha: 0.08),
-                  borderRadius: BorderRadius.circular(10),
-                  border: isCurrent
-                      ? Border.all(color: AppTheme.primary.withOpacity(0.5))
-                      : null,
+                  borderRadius: BorderRadius.circular(8),
                 ),
                 child: isCurrent && ctrl.isPlaying.value
                     ? const Icon(Icons.equalizer_rounded,
-                        color: AppTheme.primary, size: 20)
+                        color: AppTheme.primary, size: 18)
                     : Icon(_iconForExt(song.ext),
                         color: isCurrent ? AppTheme.primary : Colors.white30,
-                        size: 20),
+                        size: 18),
               ),
-              title: Text(
-                song.name,
-                style: TextStyle(
-                  color: isCurrent ? AppTheme.primary : Colors.white,
-                  fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal,
-                  fontSize: 14,
-                ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-              subtitle: Text(
-                song.ext.toUpperCase(),
-                style: const TextStyle(color: Colors.white30, fontSize: 11),
-              ),
-              onTap: () => ctrl.playSong(i),
-              trailing: isCurrent
-                  ? IconButton(
-                      icon: Icon(
-                        ctrl.isPlaying.value
-                            ? Icons.pause_rounded
-                            : Icons.play_arrow_rounded,
-                        color: AppTheme.primary,
-                      ),
-                      onPressed: ctrl.togglePlay,
-                    )
-                  : null,
+              title: Text(song.name,
+                  style: TextStyle(
+                    color: isCurrent ? AppTheme.primary : Colors.white,
+                    fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal,
+                    fontSize: 14,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis),
+              subtitle: Text(song.ext.toUpperCase(),
+                  style: const TextStyle(color: Colors.white30, fontSize: 11)),
+              // Tap → go to full player
+              onTap: () async {
+                await ctrl.playSong(i);
+                Get.to(() => const NowPlayingScreen(),
+                    transition: Transition.downToUp);
+              },
             );
           });
         },
@@ -342,13 +208,12 @@ class _SongList extends StatelessWidget {
       'flac' => Icons.high_quality_rounded,
       'm4a' || 'aac' => Icons.audiotrack_rounded,
       'wav' => Icons.graphic_eq_rounded,
-      'mp4' => Icons.video_file_rounded,
       _ => Icons.audio_file_rounded,
     };
   }
 }
 
-// ─── Mini Player Bar ──────────────────────────────────────────
+// ─── Mini Player Bar (visible at bottom of Library) ───────────
 class _MiniPlayer extends StatelessWidget {
   final PlayerController ctrl;
   const _MiniPlayer({required this.ctrl});
@@ -356,76 +221,63 @@ class _MiniPlayer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Obx(() {
-      if (ctrl.currentIndex.value < 0) return const SizedBox.shrink();
-      final song = ctrl.songs[ctrl.currentIndex.value];
+      if (ctrl.currentSong == null) return const SizedBox.shrink();
+      final song = ctrl.currentSong!;
       final dur = ctrl.duration.value.inSeconds.toDouble();
       final pos = ctrl.position.value.inSeconds.toDouble();
 
-      return Container(
-        margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-        padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
-        decoration: BoxDecoration(
-          color: AppTheme.surface,
-          borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: AppTheme.primary.withOpacity(0.3)),
-          boxShadow: [
-            BoxShadow(
-                color: AppTheme.primary.withOpacity(0.15),
-                blurRadius: 20,
-                offset: const Offset(0, 4))
-          ],
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
+      return GestureDetector(
+        onTap: () => Get.to(() => const NowPlayingScreen(),
+            transition: Transition.downToUp),
+        child: Container(
+          margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+          padding: const EdgeInsets.fromLTRB(14, 10, 14, 6),
+          decoration: BoxDecoration(
+            color: AppTheme.surface,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: AppTheme.primary.withOpacity(0.3)),
+          ),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
             Row(children: [
               Container(
-                width: 40,
-                height: 40,
+                width: 36,
+                height: 36,
                 decoration: BoxDecoration(
-                  color: AppTheme.primary.withOpacity(0.2),
-                  borderRadius: BorderRadius.circular(10),
-                ),
+                    color: AppTheme.primary.withOpacity(0.2),
+                    borderRadius: BorderRadius.circular(8)),
                 child: const Icon(Icons.music_note_rounded,
-                    color: AppTheme.primary, size: 20),
+                    color: AppTheme.primary, size: 18),
               ),
-              const SizedBox(width: 12),
+              const SizedBox(width: 10),
               Expanded(
-                child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(song.name,
-                          style: const TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.w600,
-                              fontSize: 13),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis),
-                      Text(_fmt(ctrl.position.value),
-                          style: const TextStyle(
-                              color: Colors.white38, fontSize: 11)),
-                    ]),
+                child: Text(song.name,
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w600,
+                        fontSize: 13),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis),
               ),
               IconButton(
                   icon: const Icon(Icons.skip_previous_rounded,
                       color: Colors.white70),
                   onPressed: ctrl.playPrev,
-                  iconSize: 22),
+                  iconSize: 20,
+                  padding: EdgeInsets.zero),
               Container(
-                width: 40,
-                height: 40,
+                width: 36,
+                height: 36,
                 decoration: BoxDecoration(
                     color: AppTheme.primary,
-                    borderRadius: BorderRadius.circular(12)),
+                    borderRadius: BorderRadius.circular(10)),
                 child: IconButton(
                   icon: Icon(
-                    ctrl.isPlaying.value
-                        ? Icons.pause_rounded
-                        : Icons.play_arrow_rounded,
-                    color: Colors.white,
-                  ),
+                      ctrl.isPlaying.value
+                          ? Icons.pause_rounded
+                          : Icons.play_arrow_rounded,
+                      color: Colors.white),
                   onPressed: ctrl.togglePlay,
-                  iconSize: 22,
+                  iconSize: 20,
                   padding: EdgeInsets.zero,
                 ),
               ),
@@ -433,13 +285,14 @@ class _MiniPlayer extends StatelessWidget {
                   icon: const Icon(Icons.skip_next_rounded,
                       color: Colors.white70),
                   onPressed: ctrl.playNext,
-                  iconSize: 22),
+                  iconSize: 20,
+                  padding: EdgeInsets.zero),
             ]),
-            const SizedBox(height: 8),
+            const SizedBox(height: 6),
             SliderTheme(
               data: SliderTheme.of(context).copyWith(
                 trackHeight: 2,
-                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
+                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 4),
                 overlayShape: SliderComponentShape.noOverlay,
                 activeTrackColor: AppTheme.primary,
                 inactiveTrackColor: Colors.white12,
@@ -451,15 +304,9 @@ class _MiniPlayer extends StatelessWidget {
                 onChanged: dur > 0 ? ctrl.seek : null,
               ),
             ),
-          ],
+          ]),
         ),
       );
     });
-  }
-
-  String _fmt(Duration d) {
-    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
-    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
-    return '$m:$s';
   }
 }
