@@ -47,11 +47,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 color: const Color(0xFF1E1E3A),
                 borderRadius: BorderRadius.circular(12),
                 border: Border.all(color: AppTheme.primary.withOpacity(0.3)),
-                boxShadow: [
+                boxShadow: const [
                   BoxShadow(
                       color: Colors.black45,
                       blurRadius: 12,
-                      offset: const Offset(0, 4))
+                      offset: Offset(0, 4))
                 ],
               ),
               child: Column(
@@ -235,49 +235,54 @@ class _PlayerScreenState extends State<PlayerScreen> {
       return ListView.builder(
         itemCount: ctrl.filteredSongs.length,
         itemExtent: 68,
+        addRepaintBoundaries: true,
+        addAutomaticKeepAlives: false,
         itemBuilder: (_, i) {
           final song = ctrl.filteredSongs[i];
-          return Obx(() {
-            final isCurrent = ctrl.isCurrentSong(song.path);
-            return ListTile(
-              contentPadding:
-                  const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-              leading: Container(
-                width: 40,
-                height: 40,
-                decoration: BoxDecoration(
-                  color: isCurrent
-                      ? AppTheme.primary.withOpacity(0.2)
-                      : Colors.white.withValues(alpha: 0.08),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: isCurrent && ctrl.isPlaying.value
-                    ? const Icon(Icons.equalizer_rounded,
-                        color: AppTheme.primary, size: 18)
-                    : Icon(_iconForExt(song.ext),
-                        color: isCurrent ? AppTheme.primary : Colors.white30,
-                        size: 18),
-              ),
-              title: Text(song.name,
-                  style: TextStyle(
-                    color: isCurrent ? AppTheme.primary : Colors.white,
-                    fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal,
-                    fontSize: 14,
+          return RepaintBoundary(
+            child: Obx(() {
+              final isCurrent = ctrl.isCurrentSong(song.path);
+              return ListTile(
+                contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                leading: Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: isCurrent
+                        ? AppTheme.primary.withOpacity(0.2)
+                        : Colors.white.withValues(alpha: 0.08),
+                    borderRadius: BorderRadius.circular(8),
                   ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis),
-              subtitle: Text(song.ext.toUpperCase(),
-                  style: const TextStyle(color: Colors.white30, fontSize: 11)),
-              onTap: () async {
-                _removeSuggestions();
-                await ctrl.playSong(i);
-                Get.to(() => const NowPlayingScreen(),
-                    transition: Transition.downToUp);
-              },
-              // Long-press → context menu
-              onLongPress: () => _showSongOptions(context, ctrl, song),
-            );
-          });
+                  child: isCurrent && ctrl.isPlaying.value
+                      ? const Icon(Icons.equalizer_rounded,
+                          color: AppTheme.primary, size: 18)
+                      : Icon(_iconForExt(song.ext),
+                          color: isCurrent ? AppTheme.primary : Colors.white30,
+                          size: 18),
+                ),
+                title: Text(song.name,
+                    style: TextStyle(
+                      color: isCurrent ? AppTheme.primary : Colors.white,
+                      fontWeight:
+                          isCurrent ? FontWeight.bold : FontWeight.normal,
+                      fontSize: 14,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis),
+                subtitle: Text(song.ext.toUpperCase(),
+                    style:
+                        const TextStyle(color: Colors.white30, fontSize: 11)),
+                onTap: () async {
+                  _removeSuggestions();
+                  await ctrl.playSong(i);
+                  Get.to(() => const NowPlayingScreen(),
+                      transition: Transition.downToUp);
+                },
+                onLongPress: () => _showSongOptions(context, ctrl, song),
+              );
+            }),
+          );
         },
       );
     });
@@ -331,7 +336,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 style: TextStyle(color: Colors.white)),
             onTap: () {
               Get.back();
-              // Navigate to now playing with add-to-playlist action
               Get.to(() => const NowPlayingScreen(),
                   transition: Transition.downToUp);
             },

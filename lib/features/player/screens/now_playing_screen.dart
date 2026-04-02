@@ -146,7 +146,7 @@ class _PlayerTab extends StatelessWidget {
       return SingleChildScrollView(
         child: Column(children: [
           const SizedBox(height: 20),
-          _AlbumArt(),
+          const _AlbumArt(),
           const SizedBox(height: 28),
           _SongInfo(ctrl: ctrl),
           const SizedBox(height: 20),
@@ -215,9 +215,16 @@ class _SongInfo extends StatelessWidget {
   }
 }
 
-class _SeekBar extends StatelessWidget {
+// ─── SeekBar — StatefulWidget so only it rebuilds on position tick ───
+class _SeekBar extends StatefulWidget {
   final PlayerController ctrl;
   const _SeekBar({required this.ctrl});
+  @override
+  State<_SeekBar> createState() => _SeekBarState();
+}
+
+class _SeekBarState extends State<_SeekBar> {
+  double? _dragValue;
 
   String _fmt(Duration d) {
     final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
@@ -228,8 +235,8 @@ class _SeekBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Obx(() {
-      final dur = ctrl.duration.value.inSeconds.toDouble();
-      final pos = ctrl.position.value.inSeconds.toDouble();
+      final dur = widget.ctrl.duration.value.inSeconds.toDouble();
+      final pos = _dragValue ?? widget.ctrl.position.value.inSeconds.toDouble();
       return Padding(
         padding: const EdgeInsets.symmetric(horizontal: 24),
         child: Column(children: [
@@ -245,7 +252,12 @@ class _SeekBar extends StatelessWidget {
             child: Slider(
               value: pos.clamp(0, dur <= 0 ? 1 : dur),
               max: dur <= 0 ? 1 : dur,
-              onChanged: dur > 0 ? ctrl.seek : null,
+              onChangeStart: (v) => setState(() => _dragValue = v),
+              onChanged: dur > 0 ? (v) => setState(() => _dragValue = v) : null,
+              onChangeEnd: (v) {
+                widget.ctrl.seek(v);
+                setState(() => _dragValue = null);
+              },
             ),
           ),
           Padding(
@@ -253,10 +265,13 @@ class _SeekBar extends StatelessWidget {
             child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Text(_fmt(ctrl.position.value),
-                      style:
-                          const TextStyle(color: Colors.white38, fontSize: 12)),
-                  Text(_fmt(ctrl.duration.value),
+                  Text(
+                    _fmt(_dragValue != null
+                        ? Duration(seconds: _dragValue!.toInt())
+                        : widget.ctrl.position.value),
+                    style: const TextStyle(color: Colors.white38, fontSize: 12),
+                  ),
+                  Text(_fmt(widget.ctrl.duration.value),
                       style:
                           const TextStyle(color: Colors.white38, fontSize: 12)),
                 ]),

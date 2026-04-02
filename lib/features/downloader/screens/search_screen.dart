@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
@@ -19,19 +20,16 @@ class _SearchScreenState extends State<SearchScreen> {
   final LayerLink _layerLink = LayerLink();
   OverlayEntry? _suggestionOverlay;
 
-  // Preview — separate AudioPlayer instance
-  final AudioPlayer _preview = AudioPlayer();
+  // Preview — nullable, recreated each preview session
+  AudioPlayer? _preview;
   String? _previewingId;
   bool _previewLoading = false;
+  StreamSubscription? _previewSub;
 
   @override
   void initState() {
     super.initState();
-    _preview.playerStateStream.listen((state) {
-      if (state.processingState == ProcessingState.completed) {
-        if (mounted) setState(() => _previewingId = null);
-      }
-    });
+    // No preview init here — created on demand
   }
 
   @override
@@ -39,8 +37,9 @@ class _SearchScreenState extends State<SearchScreen> {
     _removeSuggestions();
     _ctrl.dispose();
     _focusNode.dispose();
-    _preview.stop();
-    _preview.dispose();
+    _previewSub?.cancel();
+    _preview?.stop();
+    _preview?.dispose();
     super.dispose();
   }
 
@@ -117,40 +116,86 @@ class _SearchScreenState extends State<SearchScreen> {
   Future<void> _togglePreview(String videoId) async {
     // Stop any existing preview
     if (_previewingId != null) {
-      await _preview.stop();
+      _previewSub?.cancel();
+      await _preview?.stop();
+      _preview?.dispose();
+      _preview = null;
+      _previewSub = null;
+
       if (_previewingId == videoId) {
-        if (mounted) setState(() => _previewingId = null);
+        // Same song — toggle off
+        if (mounted) {
+          setState(() {
+            _previewingId = null;
+            _previewLoading = false;
+          });
+        }
         return;
       }
     }
 
-    if (mounted)
+    if (mounted) {
       setState(() {
         _previewLoading = true;
         _previewingId = videoId;
       });
+    }
 
     try {
       // Always fetch fresh URL — YT stream URLs expire
       final url = await _svc.getPreviewUrl(videoId);
-      if (url == null) throw Exception('No audio stream available');
+      if (url == null || url.isEmpty) {
+        throw Exception('No audio stream available for this video');
+      }
       if (!mounted) return;
 
-      await _preview.setUrl(url);
-      await _preview.play();
+      // Fresh player instance every time
+      _preview = AudioPlayer();
 
+      // Listen for completion
+      _previewSub = _preview!.playerStateStream.listen((state) {
+        if (state.processingState == ProcessingState.completed) {
+          if (mounted) {
+            setState(() {
+              _previewingId = null;
+              _previewLoading = false;
+            });
+          }
+          _preview?.dispose();
+          _preview = null;
+        }
+      });
+
+      // Set URL with timeout
+      await _preview!.setUrl(url).timeout(
+            const Duration(seconds: 15),
+            onTimeout: () =>
+                throw TimeoutException('Preview timed out — try again'),
+          );
+
+      await _preview!.play();
       if (mounted) setState(() => _previewLoading = false);
     } catch (e) {
+      debugPrint('Preview error: $e');
+      _previewSub?.cancel();
+      _preview?.dispose();
+      _preview = null;
+      _previewSub = null;
       if (mounted) {
         setState(() {
           _previewingId = null;
           _previewLoading = false;
         });
-        Get.snackbar('Preview failed', 'Could not load preview',
-            backgroundColor: AppTheme.surface,
-            colorText: Colors.white,
-            duration: const Duration(seconds: 2),
-            snackPosition: SnackPosition.BOTTOM);
+        Get.snackbar(
+          'Preview failed',
+          e is TimeoutException
+              ? e.message ?? 'Timed out'
+              : 'Could not load preview',
+          backgroundColor: AppTheme.surface,
+          colorText: Colors.white,
+          duration: const Duration(seconds: 3),
+          snackPosition: SnackPosition.BOTTOM,
+        );
       }
     }
   }
@@ -290,7 +335,6 @@ class _SearchScreenState extends State<SearchScreen> {
               onChanged: (q) {
                 setState(() {});
                 _svc.updateSuggestions(q);
-                // Show from existing results instantly
                 final suggestions = _svc.searchSuggestions;
                 if (suggestions.isNotEmpty) {
                   _showSuggestions(suggestions);
@@ -398,7 +442,8 @@ class _SearchScreenState extends State<SearchScreen> {
                                     child: CircularProgressIndicator(
                                         strokeWidth: 2, color: Colors.white))
                                 : Icon(
-                                    isPreviewingThis && _preview.playing
+                                    isPreviewingThis &&
+                                            (_preview?.playing ?? false)
                                         ? Icons.stop_rounded
                                         : Icons.play_arrow_rounded,
                                     color: Colors.white,

@@ -30,7 +30,6 @@ class PlayerController extends GetxController {
   RxList<SongFile> filteredSongs = <SongFile>[].obs;
 
   // The ACTIVE queue — what's actually playing (playlist or full library)
-  // This is separate from songs/filteredSongs
   RxList<SongFile> queue = <SongFile>[].obs;
   // Index within queue
   RxInt queueIndex = (-1).obs;
@@ -41,7 +40,7 @@ class PlayerController extends GetxController {
   Rx<Duration> duration = Duration.zero.obs;
   RxString error = ''.obs;
   RxString searchQuery = ''.obs;
-  RxString queueSource = 'Library'.obs; // label shown in NowPlaying
+  RxString queueSource = 'Library'.obs;
 
   Rx<LoopMode> loopMode = LoopMode.none.obs;
   RxBool shuffleEnabled = false.obs;
@@ -49,10 +48,19 @@ class PlayerController extends GetxController {
   final List<int> _shuffleHistory = [];
   int _shuffleHistoryIndex = -1;
 
+  // Throttle position updates to 4/sec — prevents 10Hz Obx rebuilds
+  DateTime _lastPositionUpdate = DateTime.now();
+
   @override
   void onInit() {
     super.onInit();
-    player.positionStream.listen((p) => position.value = p);
+    player.positionStream.listen((p) {
+      final now = DateTime.now();
+      if (now.difference(_lastPositionUpdate).inMilliseconds >= 250) {
+        position.value = p;
+        _lastPositionUpdate = now;
+      }
+    });
     player.durationStream.listen((d) => duration.value = d ?? Duration.zero);
     player.playingStream.listen((p) => isPlaying.value = p);
     player.processingStateStream.listen((s) {
@@ -109,7 +117,6 @@ class PlayerController extends GetxController {
   // ─── Play from library (sets queue = filteredSongs) ───────
   Future<void> playSong(int indexInFiltered) async {
     if (indexInFiltered < 0 || indexInFiltered >= filteredSongs.length) return;
-    // Set queue to current filtered view
     queue.assignAll(filteredSongs);
     queueSource.value =
         searchQuery.value.isEmpty ? 'Library' : 'Search results';
@@ -132,19 +139,15 @@ class PlayerController extends GetxController {
   // ─── Play next (insert after current) ────────────────────
   void addToPlayNext(SongFile song) {
     if (queue.isEmpty) {
-      // Nothing playing — just start it
       queue.assignAll([song]);
       queueSource.value = 'Library';
       queueIndex.value = 0;
       _playCurrentQueueItem();
       return;
     }
-    // Insert right after current position
     final insertAt = queueIndex.value + 1;
     final newQueue = List<SongFile>.from(queue);
-    // Remove if already in queue ahead of current
     newQueue.removeWhere((s) => s.path == song.path);
-    // Find new current index after removal
     final newCurrentIdx =
         newQueue.indexWhere((s) => s.path == currentSong?.path);
     final actualInsertAt = newCurrentIdx >= 0 ? newCurrentIdx + 1 : insertAt;
@@ -163,21 +166,19 @@ class PlayerController extends GetxController {
 
   // ─── Reorder queue ────────────────────────────────────────
   void reorderQueue(int oldIndex, int newIndex) {
-    // Adjust for ReorderableListView quirk
     if (newIndex > oldIndex) newIndex--;
     final currentPath = currentSong?.path;
     final newQueue = List<SongFile>.from(queue);
     final item = newQueue.removeAt(oldIndex);
     newQueue.insert(newIndex, item);
     queue.assignAll(newQueue);
-    // Keep queueIndex pointing at the same song
     if (currentPath != null) {
       queueIndex.value = newQueue.indexWhere((s) => s.path == currentPath);
     }
   }
 
   void removeFromQueue(int index) {
-    if (index == queueIndex.value) return; // can't remove currently playing
+    if (index == queueIndex.value) return;
     final currentPath = currentSong?.path;
     final newQueue = List<SongFile>.from(queue);
     newQueue.removeAt(index);
@@ -191,9 +192,6 @@ class PlayerController extends GetxController {
   Future<void> _playCurrentQueueItem() async {
     if (queueIndex.value < 0 || queueIndex.value >= queue.length) return;
     final song = queue[queueIndex.value];
-    // Keep currentIndex in songs list in sync for library highlighting
-    final realIdx = songs.indexWhere((s) => s.path == song.path);
-    // We store in queueIndex, not currentIndex for queue-based playback
     try {
       await player.setFilePath(song.path);
       await player.play();
@@ -266,7 +264,6 @@ class PlayerController extends GetxController {
     _playCurrentQueueItem();
   }
 
-  // Used by PlaylistDetail to play a song by path, respecting current queue context
   Future<void> playSongByPath(String path) async {
     final idx = filteredSongs.indexWhere((s) => s.path == path);
     if (idx >= 0) await playSong(idx);
@@ -305,7 +302,6 @@ class PlayerController extends GetxController {
           ? queue[queueIndex.value]
           : null;
 
-  // For library row highlighting
   bool isCurrentSong(String path) => currentSong?.path == path;
 
   Future<void> _requestPermissions() async {
@@ -355,7 +351,6 @@ List<List<String>> _scanDirsIsolate(List<String> dirPaths) {
     try {
       for (final entity in dir.listSync(recursive: true)) {
         if (entity is! File) continue;
-        // Skip empty/partial files — these are failed downloads
         if (entity.lengthSync() < 1024) continue;
         final lower = entity.path.toLowerCase();
         for (final ext in supportedExts) {
