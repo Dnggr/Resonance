@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'core/models/playlist_model.dart';
+import 'core/models/download_record.dart';
 import 'core/theme/app_theme.dart';
 import 'features/player/screens/player_screen.dart';
 import 'features/downloader/screens/search_screen.dart';
@@ -18,7 +19,9 @@ void main() async {
   ));
   await Hive.initFlutter();
   Hive.registerAdapter(PlaylistModelAdapter());
+  Hive.registerAdapter(DownloadRecordAdapter());
   await Hive.openBox<PlaylistModel>('playlists');
+  await Hive.openBox<DownloadRecord>('downloads');
   runApp(const ResonanceApp());
 }
 
@@ -44,7 +47,6 @@ class MainShell extends StatefulWidget {
 
 class _MainShellState extends State<MainShell> {
   int _index = 0;
-
   final PlayerController _playerCtrl = Get.put(PlayerController());
   final DownloaderService _dlSvc = Get.put(DownloaderService());
   final PlaylistController _playlistCtrl = Get.put(PlaylistController());

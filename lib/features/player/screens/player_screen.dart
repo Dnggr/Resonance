@@ -13,11 +13,81 @@ class PlayerScreen extends StatefulWidget {
 
 class _PlayerScreenState extends State<PlayerScreen> {
   final TextEditingController _searchCtrl = TextEditingController();
+  final LayerLink _layerLink = LayerLink();
+  OverlayEntry? _suggestionOverlay;
 
   @override
   void dispose() {
+    _removeSuggestions();
     _searchCtrl.dispose();
     super.dispose();
+  }
+
+  void _removeSuggestions() {
+    _suggestionOverlay?.remove();
+    _suggestionOverlay = null;
+  }
+
+  void _showSuggestions(
+      BuildContext context, PlayerController ctrl, List<String> suggestions) {
+    _removeSuggestions();
+    if (suggestions.isEmpty) return;
+
+    _suggestionOverlay = OverlayEntry(
+      builder: (_) => Positioned(
+        width: MediaQuery.of(context).size.width - 32,
+        child: CompositedTransformFollower(
+          link: _layerLink,
+          showWhenUnlinked: false,
+          offset: const Offset(0, 52),
+          child: Material(
+            color: Colors.transparent,
+            child: Container(
+              decoration: BoxDecoration(
+                color: const Color(0xFF1E1E3A),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: AppTheme.primary.withOpacity(0.3)),
+                boxShadow: [
+                  BoxShadow(
+                      color: Colors.black45,
+                      blurRadius: 12,
+                      offset: const Offset(0, 4))
+                ],
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: suggestions
+                    .map((s) => InkWell(
+                          onTap: () {
+                            _searchCtrl.text = s;
+                            ctrl.filterSongs(s);
+                            _removeSuggestions();
+                          },
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 16, vertical: 12),
+                            child: Row(children: [
+                              const Icon(Icons.search_rounded,
+                                  color: Colors.white38, size: 16),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(s,
+                                    style: const TextStyle(
+                                        color: Colors.white, fontSize: 14),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis),
+                              ),
+                            ]),
+                          ),
+                        ))
+                    .toList(),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    Overlay.of(context).insert(_suggestionOverlay!);
   }
 
   @override
@@ -29,9 +99,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
         child: Column(
           children: [
             _buildHeader(ctrl),
-            _buildSearchBar(ctrl),
+            _buildSearchBar(context, ctrl),
             const SizedBox(height: 4),
-            Expanded(child: _buildSongList(ctrl)),
+            Expanded(child: _buildSongList(context, ctrl)),
             _MiniPlayer(ctrl: ctrl),
           ],
         ),
@@ -42,75 +112,85 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Widget _buildHeader(PlayerController ctrl) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 20, 16, 10),
-      child: Row(
-        children: [
-          Expanded(
-            child:
-                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Text('Library',
-                  style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 28,
-                      fontWeight: FontWeight.bold,
-                      letterSpacing: -0.5)),
-              Obx(() => Text('${ctrl.songs.length} songs',
-                  style: const TextStyle(color: Colors.white38, fontSize: 13))),
-            ]),
-          ),
-          IconButton(
-            icon:
-                const Icon(Icons.playlist_play_rounded, color: Colors.white54),
-            tooltip: 'Playlists',
-            onPressed: () => Get.to(() => const PlaylistScreen()),
-          ),
-          IconButton(
-            icon: const Icon(Icons.refresh_rounded, color: Colors.white54),
-            onPressed: ctrl.loadSongs,
-          ),
-        ],
-      ),
+      child: Row(children: [
+        Expanded(
+          child:
+              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text('Library',
+                style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 28,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: -0.5)),
+            Obx(() => Text('${ctrl.songs.length} songs',
+                style: const TextStyle(color: Colors.white38, fontSize: 13))),
+          ]),
+        ),
+        IconButton(
+          icon: const Icon(Icons.playlist_play_rounded, color: Colors.white54),
+          tooltip: 'Playlists',
+          onPressed: () => Get.to(() => const PlaylistScreen()),
+        ),
+        IconButton(
+          icon: const Icon(Icons.refresh_rounded, color: Colors.white54),
+          onPressed: ctrl.loadSongs,
+        ),
+      ]),
     );
   }
 
-  Widget _buildSearchBar(PlayerController ctrl) {
+  Widget _buildSearchBar(BuildContext context, PlayerController ctrl) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
-      child: TextField(
-        controller: _searchCtrl,
-        style: const TextStyle(color: Colors.white, fontSize: 14),
-        decoration: InputDecoration(
-          hintText: 'Search songs...',
-          hintStyle: const TextStyle(color: Colors.white30),
-          prefixIcon:
-              const Icon(Icons.search_rounded, color: Colors.white38, size: 20),
-          suffixIcon: Obx(() => ctrl.searchQuery.value.isNotEmpty
-              ? IconButton(
-                  icon:
-                      const Icon(Icons.clear, color: Colors.white38, size: 18),
-                  onPressed: () {
-                    _searchCtrl.clear();
-                    ctrl.filterSongs('');
-                  },
-                )
-              : const SizedBox.shrink()),
-          filled: true,
-          fillColor: AppTheme.surface,
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: BorderSide.none,
+      child: CompositedTransformTarget(
+        link: _layerLink,
+        child: TextField(
+          controller: _searchCtrl,
+          style: const TextStyle(color: Colors.white, fontSize: 14),
+          decoration: InputDecoration(
+            hintText: 'Search songs...',
+            hintStyle: const TextStyle(color: Colors.white30),
+            prefixIcon: const Icon(Icons.search_rounded,
+                color: Colors.white38, size: 20),
+            suffixIcon: Obx(() => ctrl.searchQuery.value.isNotEmpty
+                ? IconButton(
+                    icon: const Icon(Icons.clear,
+                        color: Colors.white38, size: 18),
+                    onPressed: () {
+                      _searchCtrl.clear();
+                      ctrl.filterSongs('');
+                      _removeSuggestions();
+                    },
+                  )
+                : const SizedBox.shrink()),
+            filled: true,
+            fillColor: AppTheme.surface,
+            border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide.none),
+            focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide:
+                    const BorderSide(color: AppTheme.primary, width: 1)),
+            contentPadding: const EdgeInsets.symmetric(vertical: 12),
           ),
-          focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: const BorderSide(color: AppTheme.primary, width: 1),
-          ),
-          contentPadding: const EdgeInsets.symmetric(vertical: 12),
+          onChanged: (q) {
+            ctrl.filterSongs(q);
+            final suggestions = ctrl.getSearchSuggestions(q);
+            if (suggestions.isNotEmpty) {
+              _showSuggestions(context, ctrl, suggestions);
+            } else {
+              _removeSuggestions();
+            }
+          },
+          onSubmitted: (_) => _removeSuggestions(),
+          onTapOutside: (_) => _removeSuggestions(),
         ),
-        onChanged: ctrl.filterSongs,
       ),
     );
   }
 
-  Widget _buildSongList(PlayerController ctrl) {
+  Widget _buildSongList(BuildContext context, PlayerController ctrl) {
     return Obx(() {
       if (ctrl.isLoading.value) {
         return const Center(
@@ -154,12 +234,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
       return ListView.builder(
         itemCount: ctrl.filteredSongs.length,
-        itemExtent: 68, // fixed height = no layout recalc = fast scroll
+        itemExtent: 68,
         itemBuilder: (_, i) {
           final song = ctrl.filteredSongs[i];
           return Obx(() {
-            final realIdx = ctrl.songs.indexWhere((s) => s.path == song.path);
-            final isCurrent = ctrl.currentIndex.value == realIdx;
+            final isCurrent = ctrl.isCurrentSong(song.path);
             return ListTile(
               contentPadding:
                   const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
@@ -189,17 +268,78 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   overflow: TextOverflow.ellipsis),
               subtitle: Text(song.ext.toUpperCase(),
                   style: const TextStyle(color: Colors.white30, fontSize: 11)),
-              // Tap → go to full player
               onTap: () async {
+                _removeSuggestions();
                 await ctrl.playSong(i);
                 Get.to(() => const NowPlayingScreen(),
                     transition: Transition.downToUp);
               },
+              // Long-press → context menu
+              onLongPress: () => _showSongOptions(context, ctrl, song),
             );
           });
         },
       );
     });
+  }
+
+  void _showSongOptions(
+      BuildContext context, PlayerController ctrl, SongFile song) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: AppTheme.surface,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (_) => Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const SizedBox(height: 8),
+          Container(
+              width: 36,
+              height: 4,
+              decoration: BoxDecoration(
+                  color: Colors.white24,
+                  borderRadius: BorderRadius.circular(2))),
+          const SizedBox(height: 12),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            child: Text(song.name,
+                style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 15),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis),
+          ),
+          const SizedBox(height: 16),
+          ListTile(
+            leading: const Icon(Icons.queue_play_next_rounded,
+                color: AppTheme.primary),
+            title:
+                const Text('Play Next', style: TextStyle(color: Colors.white)),
+            subtitle: const Text('Insert after current song',
+                style: TextStyle(color: Colors.white38, fontSize: 12)),
+            onTap: () {
+              Get.back();
+              ctrl.addToPlayNext(song);
+            },
+          ),
+          ListTile(
+            leading:
+                const Icon(Icons.playlist_add_rounded, color: Colors.white54),
+            title: const Text('Add to Playlist',
+                style: TextStyle(color: Colors.white)),
+            onTap: () {
+              Get.back();
+              // Navigate to now playing with add-to-playlist action
+              Get.to(() => const NowPlayingScreen(),
+                  transition: Transition.downToUp);
+            },
+          ),
+          const SizedBox(height: 16),
+        ],
+      ),
+    );
   }
 
   IconData _iconForExt(String ext) {
@@ -213,7 +353,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 }
 
-// ─── Mini Player Bar (visible at bottom of Library) ───────────
 class _MiniPlayer extends StatelessWidget {
   final PlayerController ctrl;
   const _MiniPlayer({required this.ctrl});
@@ -250,13 +389,20 @@ class _MiniPlayer extends StatelessWidget {
               ),
               const SizedBox(width: 10),
               Expanded(
-                child: Text(song.name,
-                    style: const TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w600,
-                        fontSize: 13),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis),
+                child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(song.name,
+                          style: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w600,
+                              fontSize: 13),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis),
+                      Text(ctrl.queueSource.value,
+                          style: const TextStyle(
+                              color: Colors.white38, fontSize: 11)),
+                    ]),
               ),
               IconButton(
                   icon: const Icon(Icons.skip_previous_rounded,

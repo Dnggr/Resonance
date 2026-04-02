@@ -4,8 +4,27 @@ import '../../../core/theme/app_theme.dart';
 import '../controllers/player_controller.dart';
 import '../../playlist/controllers/playlist_controller.dart';
 
-class NowPlayingScreen extends StatelessWidget {
+class NowPlayingScreen extends StatefulWidget {
   const NowPlayingScreen({super.key});
+  @override
+  State<NowPlayingScreen> createState() => _NowPlayingScreenState();
+}
+
+class _NowPlayingScreenState extends State<NowPlayingScreen>
+    with SingleTickerProviderStateMixin {
+  late TabController _tabCtrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _tabCtrl = TabController(length: 2, vsync: this);
+  }
+
+  @override
+  void dispose() {
+    _tabCtrl.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -19,9 +38,18 @@ class NowPlayingScreen extends StatelessWidget {
               color: Colors.white, size: 32),
           onPressed: () => Get.back(),
         ),
-        title: const Text('Now Playing',
-            style: TextStyle(color: Colors.white70, fontSize: 14)),
-        centerTitle: true,
+        title: TabBar(
+          controller: _tabCtrl,
+          tabs: const [
+            Tab(text: 'Now Playing'),
+            Tab(text: 'Queue'),
+          ],
+          labelColor: AppTheme.primary,
+          unselectedLabelColor: Colors.white38,
+          indicatorColor: AppTheme.primary,
+          indicatorSize: TabBarIndicatorSize.label,
+          dividerColor: Colors.transparent,
+        ),
         actions: [
           Obx(() => ctrl.currentSong != null
               ? IconButton(
@@ -33,27 +61,15 @@ class NowPlayingScreen extends StatelessWidget {
               : const SizedBox.shrink()),
         ],
       ),
-      body: Obx(() {
-        if (ctrl.currentSong == null) {
-          return const Center(
-              child: Text('Nothing playing',
-                  style: TextStyle(color: Colors.white38)));
-        }
-        return Column(
-          children: [
-            const Spacer(),
-            _AlbumArt(song: ctrl.currentSong!),
-            const SizedBox(height: 32),
-            _SongInfo(ctrl: ctrl),
-            const SizedBox(height: 24),
-            _SeekBar(ctrl: ctrl),
-            const SizedBox(height: 16),
-            _Controls(ctrl: ctrl),
-            const SizedBox(height: 24),
-            _QueueList(ctrl: ctrl),
-          ],
-        );
-      }),
+      body: TabBarView(
+        controller: _tabCtrl,
+        children: [
+          _PlayerTab(
+              ctrl: ctrl,
+              onAddToPlaylist: (path) => _showAddToPlaylist(context, path)),
+          _QueueTab(ctrl: ctrl),
+        ],
+      ),
     );
   }
 
@@ -64,57 +80,88 @@ class NowPlayingScreen extends StatelessWidget {
       backgroundColor: AppTheme.surface,
       shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (_) => Obx(() {
-        return Column(mainAxisSize: MainAxisSize.min, children: [
-          const SizedBox(height: 8),
-          Container(
-              width: 36,
-              height: 4,
-              decoration: BoxDecoration(
-                  color: Colors.white24,
-                  borderRadius: BorderRadius.circular(2))),
-          const SizedBox(height: 16),
-          const Text('Add to playlist',
-              style: TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.bold,
-                  fontSize: 16)),
-          const SizedBox(height: 8),
-          if (plCtrl.playlists.isEmpty)
-            const Padding(
-              padding: EdgeInsets.all(24),
-              child: Text('No playlists yet. Create one from the Library.',
-                  style: TextStyle(color: Colors.white38)),
-            )
-          else
-            ...plCtrl.playlists.map((pl) => ListTile(
-                  leading: const Icon(Icons.playlist_play_rounded,
-                      color: AppTheme.primary),
-                  title: Text(pl.name,
-                      style: const TextStyle(color: Colors.white)),
-                  subtitle: Text('${pl.songPaths.length} songs',
-                      style:
-                          const TextStyle(color: Colors.white38, fontSize: 12)),
-                  onTap: () {
-                    plCtrl.addSongToPlaylist(pl.id, songPath);
-                    Get.back();
-                    Get.snackbar('Added', 'Song added to ${pl.name}',
-                        backgroundColor: AppTheme.surface,
-                        colorText: Colors.white,
-                        duration: const Duration(seconds: 2));
-                  },
-                )),
-          const SizedBox(height: 16),
-        ]);
-      }),
+      builder: (_) => Obx(() => Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(height: 8),
+              Container(
+                  width: 36,
+                  height: 4,
+                  decoration: BoxDecoration(
+                      color: Colors.white24,
+                      borderRadius: BorderRadius.circular(2))),
+              const SizedBox(height: 16),
+              const Text('Add to playlist',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16)),
+              const SizedBox(height: 8),
+              if (plCtrl.playlists.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.all(24),
+                  child: Text('No playlists yet. Create one from the Library.',
+                      style: TextStyle(color: Colors.white38)),
+                )
+              else
+                ...plCtrl.playlists.map((pl) => ListTile(
+                      leading: const Icon(Icons.playlist_play_rounded,
+                          color: AppTheme.primary),
+                      title: Text(pl.name,
+                          style: const TextStyle(color: Colors.white)),
+                      subtitle: Text('${pl.songPaths.length} songs',
+                          style: const TextStyle(
+                              color: Colors.white38, fontSize: 12)),
+                      onTap: () {
+                        plCtrl.addSongToPlaylist(pl.id, songPath);
+                        Get.back();
+                        Get.snackbar('Added', 'Song added to ${pl.name}',
+                            backgroundColor: AppTheme.surface,
+                            colorText: Colors.white,
+                            duration: const Duration(seconds: 2),
+                            snackPosition: SnackPosition.BOTTOM);
+                      },
+                    )),
+              const SizedBox(height: 16),
+            ],
+          )),
     );
   }
 }
 
-class _AlbumArt extends StatelessWidget {
-  final SongFile song;
-  const _AlbumArt({required this.song});
+// ─── Player Tab ───────────────────────────────────────────────
+class _PlayerTab extends StatelessWidget {
+  final PlayerController ctrl;
+  final Function(String) onAddToPlaylist;
+  const _PlayerTab({required this.ctrl, required this.onAddToPlaylist});
 
+  @override
+  Widget build(BuildContext context) {
+    return Obx(() {
+      if (ctrl.currentSong == null) {
+        return const Center(
+            child: Text('Nothing playing',
+                style: TextStyle(color: Colors.white38)));
+      }
+      return SingleChildScrollView(
+        child: Column(children: [
+          const SizedBox(height: 20),
+          _AlbumArt(),
+          const SizedBox(height: 28),
+          _SongInfo(ctrl: ctrl),
+          const SizedBox(height: 20),
+          _SeekBar(ctrl: ctrl),
+          const SizedBox(height: 12),
+          _Controls(ctrl: ctrl),
+          const SizedBox(height: 20),
+        ]),
+      );
+    });
+  }
+}
+
+class _AlbumArt extends StatelessWidget {
+  const _AlbumArt();
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -143,7 +190,6 @@ class _AlbumArt extends StatelessWidget {
 class _SongInfo extends StatelessWidget {
   final PlayerController ctrl;
   const _SongInfo({required this.ctrl});
-
   @override
   Widget build(BuildContext context) {
     return Padding(
@@ -160,8 +206,10 @@ class _SongInfo extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
             )),
         const SizedBox(height: 4),
-        Obx(() => Text(ctrl.currentSong?.ext.toUpperCase() ?? '',
-            style: const TextStyle(color: Colors.white38, fontSize: 13))),
+        Obx(() => Text(
+              '${ctrl.currentSong?.ext.toUpperCase() ?? ''} · ${ctrl.queueSource.value}',
+              style: const TextStyle(color: Colors.white38, fontSize: 13),
+            )),
       ]),
     );
   }
@@ -170,6 +218,12 @@ class _SongInfo extends StatelessWidget {
 class _SeekBar extends StatelessWidget {
   final PlayerController ctrl;
   const _SeekBar({required this.ctrl});
+
+  String _fmt(Duration d) {
+    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    return '$m:$s';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -197,33 +251,25 @@ class _SeekBar extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8),
             child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(_fmt(ctrl.position.value),
-                    style:
-                        const TextStyle(color: Colors.white38, fontSize: 12)),
-                Text(_fmt(ctrl.duration.value),
-                    style:
-                        const TextStyle(color: Colors.white38, fontSize: 12)),
-              ],
-            ),
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(_fmt(ctrl.position.value),
+                      style:
+                          const TextStyle(color: Colors.white38, fontSize: 12)),
+                  Text(_fmt(ctrl.duration.value),
+                      style:
+                          const TextStyle(color: Colors.white38, fontSize: 12)),
+                ]),
           ),
         ]),
       );
     });
-  }
-
-  String _fmt(Duration d) {
-    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
-    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
-    return '$m:$s';
   }
 }
 
 class _Controls extends StatelessWidget {
   final PlayerController ctrl;
   const _Controls({required this.ctrl});
-
   @override
   Widget build(BuildContext context) {
     return Obx(() => Padding(
@@ -231,7 +277,6 @@ class _Controls extends StatelessWidget {
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
             children: [
-              // Shuffle
               IconButton(
                 icon: Icon(Icons.shuffle_rounded,
                     color: ctrl.shuffleEnabled.value
@@ -240,13 +285,11 @@ class _Controls extends StatelessWidget {
                     size: 22),
                 onPressed: ctrl.toggleShuffle,
               ),
-              // Prev
               IconButton(
                 icon: const Icon(Icons.skip_previous_rounded,
                     color: Colors.white, size: 32),
                 onPressed: ctrl.playPrev,
               ),
-              // Play/Pause — big center button
               Container(
                 width: 64,
                 height: 64,
@@ -268,13 +311,11 @@ class _Controls extends StatelessWidget {
                   onPressed: ctrl.togglePlay,
                 ),
               ),
-              // Next
               IconButton(
                 icon: const Icon(Icons.skip_next_rounded,
                     color: Colors.white, size: 32),
                 onPressed: ctrl.playNext,
               ),
-              // Loop
               IconButton(
                 icon: Icon(
                     ctrl.loopMode.value == LoopMode.one
@@ -292,67 +333,95 @@ class _Controls extends StatelessWidget {
   }
 }
 
-// ─── Queue list below controls ────────────────────────────────
-class _QueueList extends StatelessWidget {
+// ─── Queue Tab — reorderable ──────────────────────────────────
+class _QueueTab extends StatelessWidget {
   final PlayerController ctrl;
-  const _QueueList({required this.ctrl});
+  const _QueueTab({required this.ctrl});
 
   @override
   Widget build(BuildContext context) {
     return Obx(() {
-      if (ctrl.songs.isEmpty) return const SizedBox.shrink();
-      final currentIdx = ctrl.currentIndex.value;
-      // Show up to 5 upcoming songs
-      final upcoming = <SongFile>[];
-      for (int i = 1; i <= 5; i++) {
-        final idx = (currentIdx + i) % ctrl.songs.length;
-        if (idx != currentIdx) upcoming.add(ctrl.songs[idx]);
+      if (ctrl.queue.isEmpty) {
+        return const Center(
+            child: Text('Queue is empty',
+                style: TextStyle(color: Colors.white38)));
       }
-      return Expanded(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Padding(
-              padding: EdgeInsets.fromLTRB(24, 0, 24, 8),
-              child: Text('Up next',
-                  style: TextStyle(
-                      color: Colors.white38,
-                      fontSize: 12,
-                      fontWeight: FontWeight.bold)),
-            ),
-            Expanded(
-              child: ListView.builder(
-                padding: EdgeInsets.zero,
-                itemCount: upcoming.length,
-                itemBuilder: (_, i) {
-                  final song = upcoming[i];
-                  return ListTile(
-                    dense: true,
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 24),
-                    leading: Icon(_iconForExt(song.ext),
-                        color: Colors.white24, size: 16),
-                    title: Text(song.name,
-                        style: const TextStyle(
-                            color: Colors.white54, fontSize: 13),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis),
-                    onTap: () {
-                      final idx = ctrl.songs.indexOf(song);
-                      ctrl.playByRealIndex(idx);
-                    },
-                  );
-                },
-              ),
-            ),
-          ],
+
+      return Column(children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 8),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text('${ctrl.queue.length} songs · ${ctrl.queueSource.value}',
+                  style: const TextStyle(color: Colors.white54, fontSize: 13)),
+              const Text('Hold to reorder',
+                  style: TextStyle(color: Colors.white24, fontSize: 12)),
+            ],
+          ),
         ),
-      );
+        Expanded(
+          child: ReorderableListView.builder(
+            itemCount: ctrl.queue.length,
+            onReorder: ctrl.reorderQueue,
+            proxyDecorator: (child, index, animation) => Material(
+              color: Colors.transparent,
+              child: child,
+            ),
+            itemBuilder: (_, i) {
+              final song = ctrl.queue[i];
+              final isCurrent = i == ctrl.queueIndex.value;
+              return ListTile(
+                key: ValueKey(song.path + i.toString()),
+                contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
+                leading: Container(
+                  width: 36,
+                  height: 36,
+                  decoration: BoxDecoration(
+                    color: isCurrent
+                        ? AppTheme.primary.withOpacity(0.2)
+                        : Colors.white.withValues(alpha: 0.06),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: isCurrent && ctrl.isPlaying.value
+                      ? const Icon(Icons.equalizer_rounded,
+                          color: AppTheme.primary, size: 16)
+                      : Center(
+                          child: Text('${i + 1}',
+                              style: TextStyle(
+                                  color: isCurrent
+                                      ? AppTheme.primary
+                                      : Colors.white30,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.bold))),
+                ),
+                title: Text(song.name,
+                    style: TextStyle(
+                        color: isCurrent ? AppTheme.primary : Colors.white,
+                        fontWeight:
+                            isCurrent ? FontWeight.bold : FontWeight.normal,
+                        fontSize: 13),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis),
+                subtitle: Text(song.ext.toUpperCase(),
+                    style:
+                        const TextStyle(color: Colors.white24, fontSize: 11)),
+                trailing: isCurrent
+                    ? const Icon(Icons.volume_up_rounded,
+                        color: AppTheme.primary, size: 16)
+                    : IconButton(
+                        icon: const Icon(Icons.close_rounded,
+                            color: Colors.white24, size: 18),
+                        onPressed: () => ctrl.removeFromQueue(i),
+                        padding: EdgeInsets.zero,
+                      ),
+                onTap: () => ctrl.playByQueueIndex(i),
+              );
+            },
+          ),
+        ),
+      ]);
     });
   }
-
-  IconData _iconForExt(String ext) => switch (ext.toLowerCase()) {
-        'mp3' => Icons.music_note_rounded,
-        'flac' => Icons.high_quality_rounded,
-        _ => Icons.audiotrack_rounded,
-      };
 }

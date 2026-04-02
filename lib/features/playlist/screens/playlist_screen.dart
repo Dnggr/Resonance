@@ -11,6 +11,7 @@ class PlaylistScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final plCtrl = Get.find<PlaylistController>();
+    final playerCtrl = Get.find<PlayerController>();
     return Scaffold(
       backgroundColor: AppTheme.background,
       appBar: AppBar(
@@ -86,8 +87,20 @@ class PlaylistScreen extends StatelessWidget {
                 subtitle: Text('${pl.songPaths.length} songs',
                     style:
                         const TextStyle(color: Colors.white38, fontSize: 12)),
-                onTap: () =>
-                    Get.to(() => PlaylistDetailScreen(playlistId: pl.id)),
+                onTap: () async {
+                  final allSongs = pl.songPaths.map((path) {
+                    final name = path.split('/').last.replaceAll(
+                        RegExp(r'\.(mp3|flac|m4a|aac|wav)$',
+                            caseSensitive: false),
+                        '');
+                    final ext = path.split('.').last.toLowerCase();
+                    return SongFile(path: path, name: name, ext: ext);
+                  }).toList();
+
+                  await playerCtrl.playFromPlaylist(allSongs, i, pl.name);
+                  Get.to(() => const NowPlayingScreen(),
+                      transition: Transition.downToUp);
+                },
                 trailing: PopupMenuButton<String>(
                   color: const Color(0xFF1E1E3A),
                   shape: RoundedRectangleBorder(

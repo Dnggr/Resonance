@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
+import '../../../core/models/download_record.dart';
 import '../../../core/theme/app_theme.dart';
 import '../services/downloader_service.dart';
 
@@ -22,20 +23,29 @@ class DownloadsScreen extends StatelessWidget {
           onPressed: () => Get.back(),
         ),
         actions: [
-          Obx(() => svc.completedDownloads.isNotEmpty
-              ? TextButton(
-                  onPressed: svc.clearCompleted,
-                  child: const Text('Clear done',
-                      style: TextStyle(color: AppTheme.primary, fontSize: 13)),
+          Obx(() => svc.downloadHistory.isNotEmpty
+              ? PopupMenuButton<String>(
+                  color: const Color(0xFF1E1E3A),
+                  icon: const Icon(Icons.more_vert_rounded,
+                      color: Colors.white54),
+                  onSelected: (val) {
+                    if (val == 'clear') svc.clearHistory();
+                  },
+                  itemBuilder: (_) => [
+                    const PopupMenuItem(
+                        value: 'clear',
+                        child: Text('Clear all history',
+                            style: TextStyle(color: Colors.redAccent))),
+                  ],
                 )
               : const SizedBox.shrink()),
         ],
       ),
       body: Obx(() {
         final active = svc.activeDownloads;
-        final done = svc.completedDownloads;
+        final history = svc.downloadHistory;
 
-        if (active.isEmpty && done.isEmpty) {
+        if (active.isEmpty && history.isEmpty) {
           return const Center(
             child: Column(mainAxisSize: MainAxisSize.min, children: [
               Icon(Icons.download_rounded, size: 64, color: Colors.white12),
@@ -53,17 +63,16 @@ class DownloadsScreen extends StatelessWidget {
           padding: const EdgeInsets.all(16),
           children: [
             if (active.isNotEmpty) ...[
-              _sectionHeader('Downloading', active.length,
-                  color: AppTheme.primary),
+              _sectionHeader('Active', active.length, color: AppTheme.primary),
               const SizedBox(height: 8),
-              ...active.map((t) => _DownloadTile(task: t, svc: svc)),
+              ...active.map((t) => _ActiveTile(task: t, svc: svc)),
               const SizedBox(height: 20),
             ],
-            if (done.isNotEmpty) ...[
-              _sectionHeader('Completed', done.length,
+            if (history.isNotEmpty) ...[
+              _sectionHeader('Downloaded', history.length,
                   color: Colors.greenAccent),
               const SizedBox(height: 8),
-              ...done.map((t) => _DownloadTile(task: t, svc: svc)),
+              ...history.map((r) => _HistoryTile(record: r, svc: svc)),
             ],
           ],
         );
@@ -96,11 +105,11 @@ class DownloadsScreen extends StatelessWidget {
   }
 }
 
-// ─── Download Tile ────────────────────────────────────────────
-class _DownloadTile extends StatelessWidget {
+// ─── Active Download Tile ─────────────────────────────────────
+class _ActiveTile extends StatelessWidget {
   final DownloadTask task;
   final DownloaderService svc;
-  const _DownloadTile({required this.task, required this.svc});
+  const _ActiveTile({required this.task, required this.svc});
 
   @override
   Widget build(BuildContext context) {
@@ -118,43 +127,36 @@ class _DownloadTile extends StatelessWidget {
           color: AppTheme.surface,
           borderRadius: BorderRadius.circular(14),
           border: Border.all(
-            color: isDone
-                ? Colors.greenAccent.withOpacity(0.25)
-                : isError
-                    ? AppTheme.accent.withOpacity(0.25)
-                    : isPaused
-                        ? Colors.orangeAccent.withOpacity(0.2)
-                        : isActive
-                            ? AppTheme.primary.withOpacity(0.25)
-                            : Colors.white.withValues(alpha: 0.08),
-            width: 1,
+            color: isError
+                ? AppTheme.accent.withOpacity(0.3)
+                : isPaused
+                    ? Colors.orangeAccent.withOpacity(0.3)
+                    : isActive
+                        ? AppTheme.primary.withOpacity(0.3)
+                        : Colors.white.withValues(alpha: 0.08),
           ),
         ),
         child: Padding(
           padding: const EdgeInsets.all(12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(children: [
-                // Thumbnail
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
-                  child: Image.network(
-                    task.thumbnail,
-                    width: 48,
-                    height: 48,
+          child:
+              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: Image.network(task.thumbnail,
+                    width: 46,
+                    height: 46,
                     fit: BoxFit.cover,
                     errorBuilder: (_, __, ___) => Container(
-                        width: 48,
-                        height: 48,
+                        width: 46,
+                        height: 46,
                         color: Colors.white10,
                         child: const Icon(Icons.music_note,
-                            color: Colors.white30, size: 20)),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Column(
+                            color: Colors.white30, size: 18))),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(task.title,
@@ -164,144 +166,100 @@ class _DownloadTile extends StatelessWidget {
                               fontWeight: FontWeight.w600),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis),
-                      const SizedBox(height: 2),
                       Text(task.author,
                           style: const TextStyle(
                               color: Colors.white38, fontSize: 11),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis),
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 8),
-                // Format badge
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-                  decoration: BoxDecoration(
+                    ]),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                decoration: BoxDecoration(
                     color: Colors.white.withValues(alpha: 0.08),
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: Text(task.formatLabel,
-                      style: const TextStyle(
-                          color: Colors.white54,
-                          fontSize: 10,
-                          fontWeight: FontWeight.bold)),
-                ),
-              ]),
-
+                    borderRadius: BorderRadius.circular(6)),
+                child: Text(task.formatLabel,
+                    style: const TextStyle(
+                        color: Colors.white54,
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold)),
+              ),
+            ]),
+            if (isActive || isPaused) ...[
               const SizedBox(height: 10),
-
-              // ── Progress bar ──────────────────────────
-              if (isActive || isDone || isPaused) ...[
-                LinearProgressIndicator(
-                  value: task.progress.value,
-                  backgroundColor: Colors.white10,
-                  valueColor: AlwaysStoppedAnimation<Color>(isDone
-                      ? Colors.greenAccent
-                      : isPaused
-                          ? Colors.orangeAccent
-                          : AppTheme.primary),
-                  borderRadius: BorderRadius.circular(4),
-                  minHeight: 3,
-                ),
-                const SizedBox(height: 6),
-              ],
-
-              // ── Status Row ────────────────────────────
-              Row(children: [
-                _statusIcon(status),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    task.statusLabel.value,
+              LinearProgressIndicator(
+                value: task.progress.value,
+                backgroundColor: Colors.white10,
+                valueColor: AlwaysStoppedAnimation<Color>(
+                    isPaused ? Colors.orangeAccent : AppTheme.primary),
+                borderRadius: BorderRadius.circular(3),
+                minHeight: 3,
+              ),
+              const SizedBox(height: 6),
+            ],
+            Row(children: [
+              _statusIcon(status),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(task.statusLabel.value,
                     style: TextStyle(
-                      color: isDone
-                          ? Colors.greenAccent
-                          : isError
-                              ? AppTheme.accent
-                              : isPaused
-                                  ? Colors.orangeAccent
-                                  : Colors.white54,
+                      color: isError
+                          ? AppTheme.accent
+                          : isPaused
+                              ? Colors.orangeAccent
+                              : Colors.white54,
                       fontSize: 11,
                     ),
                     maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                if (isActive && task.progress.value > 0)
-                  Text(
-                    '${(task.progress.value * 100).toStringAsFixed(0)}%',
+                    overflow: TextOverflow.ellipsis),
+              ),
+              if (isActive && task.progress.value > 0)
+                Text('${(task.progress.value * 100).toStringAsFixed(0)}%',
                     style: const TextStyle(
                         color: AppTheme.primary,
                         fontSize: 11,
-                        fontWeight: FontWeight.bold),
-                  ),
-                if (isActive)
-                  GestureDetector(
-                    onTap: () => svc.pauseTask(task),
-                    child: Container(
-                      margin: const EdgeInsets.only(left: 8),
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 10, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withOpacity(0.08),
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: Colors.white12),
-                      ),
-                      child: const Text('Pause',
-                          style: TextStyle(
-                              color: Colors.white54,
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600)),
-                    ),
-                  ),
-                if (isPaused)
-                  GestureDetector(
-                    onTap: () => svc.resumeTask(task),
-                    child: Container(
-                      margin: const EdgeInsets.only(left: 8),
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 10, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: AppTheme.primary.withOpacity(0.15),
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(
-                            color: AppTheme.primary.withOpacity(0.3)),
-                      ),
-                      child: const Text('Resume',
-                          style: TextStyle(
-                              color: AppTheme.primary,
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600)),
-                    ),
-                  ),
-                if (isError)
-                  GestureDetector(
-                    onTap: () => svc.retryTask(task),
-                    child: Container(
-                      margin: const EdgeInsets.only(left: 8),
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 10, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: AppTheme.accent.withOpacity(0.15),
-                        borderRadius: BorderRadius.circular(8),
-                        border:
-                            Border.all(color: AppTheme.accent.withOpacity(0.3)),
-                      ),
-                      child: const Text('Retry',
-                          style: TextStyle(
-                              color: AppTheme.accent,
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600)),
-                    ),
-                  ),
-              ]),
-            ],
-          ),
+                        fontWeight: FontWeight.bold)),
+              if (isActive)
+                _actionBtn('Pause', Colors.white54, () => svc.pauseTask(task)),
+              if (isPaused)
+                _actionBtn(
+                    'Resume', AppTheme.primary, () => svc.resumeTask(task),
+                    borderColor: AppTheme.primary),
+              if (isError)
+                _actionBtn('Retry', AppTheme.accent, () => svc.retryTask(task),
+                    borderColor: AppTheme.accent),
+              if (isError || isPaused) ...[
+                const SizedBox(width: 6),
+                GestureDetector(
+                  onTap: () => svc.cancelTask(task),
+                  child: const Icon(Icons.close_rounded,
+                      color: Colors.white24, size: 18),
+                ),
+              ]
+            ]),
+          ]),
         ),
       );
     });
+  }
+
+  Widget _actionBtn(String label, Color color, VoidCallback onTap,
+      {Color? borderColor}) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        margin: const EdgeInsets.only(left: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        decoration: BoxDecoration(
+          color: color.withOpacity(0.1),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: (borderColor ?? color).withOpacity(0.3)),
+        ),
+        child: Text(label,
+            style: TextStyle(
+                color: color, fontSize: 11, fontWeight: FontWeight.w600)),
+      ),
+    );
   }
 
   Widget _statusIcon(DownloadStatus s) {
@@ -324,5 +282,94 @@ class _DownloadTile extends StatelessWidget {
         const Icon(Icons.error_rounded, color: AppTheme.accent, size: 13),
       _ => const Icon(Icons.schedule_rounded, color: Colors.white24, size: 13),
     };
+  }
+}
+
+// ─── History Tile (persisted) ─────────────────────────────────
+class _HistoryTile extends StatelessWidget {
+  final DownloadRecord record;
+  final DownloaderService svc;
+  const _HistoryTile({required this.record, required this.svc});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      decoration: BoxDecoration(
+        color: AppTheme.surface,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.greenAccent.withOpacity(0.15)),
+      ),
+      child: ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        leading: ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: Image.network(record.thumbnail,
+              width: 46,
+              height: 46,
+              fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) => Container(
+                  width: 46,
+                  height: 46,
+                  color: Colors.white10,
+                  child: const Icon(Icons.music_note,
+                      color: Colors.white30, size: 18))),
+        ),
+        title: Text(record.title,
+            style: const TextStyle(
+                color: Colors.white, fontSize: 13, fontWeight: FontWeight.w600),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis),
+        subtitle: Text(
+            '${record.author} · ${record.format} · ${_fmtDate(record.downloadedAt)}',
+            style: const TextStyle(color: Colors.white38, fontSize: 11)),
+        trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+          const Icon(Icons.check_circle_rounded,
+              color: Colors.greenAccent, size: 14),
+          const SizedBox(width: 8),
+          GestureDetector(
+            onTap: () => _confirmDelete(context, svc, record),
+            child: const Icon(Icons.delete_outline_rounded,
+                color: Colors.white24, size: 20),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  void _confirmDelete(
+      BuildContext context, DownloaderService svc, DownloadRecord record) {
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: AppTheme.surface,
+        title: const Text('Delete download?',
+            style: TextStyle(color: Colors.white)),
+        content: Text('This will remove "${record.title}" from your device.',
+            style: const TextStyle(color: Colors.white54)),
+        actions: [
+          TextButton(
+              onPressed: () => Get.back(),
+              child: const Text('Cancel',
+                  style: TextStyle(color: Colors.white38))),
+          TextButton(
+              onPressed: () {
+                Get.back();
+                svc.deleteHistoryRecord(record);
+              },
+              child: const Text('Delete',
+                  style: TextStyle(color: AppTheme.accent))),
+        ],
+      ),
+    );
+  }
+
+  String _fmtDate(DateTime dt) {
+    final now = DateTime.now();
+    final diff = now.difference(dt);
+    if (diff.inDays == 0) return 'Today';
+    if (diff.inDays == 1) return 'Yesterday';
+    if (diff.inDays < 7) return '${diff.inDays}d ago';
+    return '${dt.day}/${dt.month}/${dt.year}';
   }
 }
