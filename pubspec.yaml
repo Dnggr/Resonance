@@ -12,7 +12,7 @@ dependencies:
   just_audio: ^0.9.46
   audio_service: ^0.18.13
   audio_session: ^0.1.21
-  youtube_explode_dart: ^3.0.5       # CRITICAL upgrade — v2 is broken on YouTube
+  youtube_explode_dart: ^2.5.3   # Stable, audioOnly API intact  
   dio: ^5.7.0
   path_provider: ^2.1.4
   permission_handler: ^11.4.0

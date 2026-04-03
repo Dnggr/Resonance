@@ -20,24 +20,18 @@ class _SearchScreenState extends State<SearchScreen> {
   final LayerLink _layerLink = LayerLink();
   OverlayEntry? _suggestionOverlay;
 
-  // Preview — nullable, recreated each preview session
+// ── Preview state ──────────────────────────────────────────────
   AudioPlayer? _preview;
   String? _previewingId;
   bool _previewLoading = false;
-  StreamSubscription? _previewSub;
 
-  @override
-  void initState() {
-    super.initState();
-    // No preview init here — created on demand
-  }
+// No initState needed for preview
 
   @override
   void dispose() {
     _removeSuggestions();
     _ctrl.dispose();
     _focusNode.dispose();
-    _previewSub?.cancel();
     _preview?.stop();
     _preview?.dispose();
     super.dispose();
@@ -114,88 +108,70 @@ class _SearchScreenState extends State<SearchScreen> {
   }
 
   Future<void> _togglePreview(String videoId) async {
-    // Stop any existing preview
-    if (_previewingId != null) {
-      _previewSub?.cancel();
-      await _preview?.stop();
-      _preview?.dispose();
+    // ── Stop whatever is currently playing ──────────────────────
+    final wasPlayingThis = _previewingId == videoId;
+    if (_preview != null) {
+      await _preview!.stop();
+      _preview!.dispose();
       _preview = null;
-      _previewSub = null;
-
-      if (_previewingId == videoId) {
-        // Same song — toggle off
-        if (mounted) {
-          setState(() {
-            _previewingId = null;
-            _previewLoading = false;
-          });
-        }
-        return;
-      }
     }
+    if (mounted)
+      setState(() {
+        _previewingId = null;
+        _previewLoading = false;
+      });
 
-    if (mounted) {
+    // If tapped same song → it was a toggle-off, we're done
+    if (wasPlayingThis) return;
+
+    // ── Start new preview ───────────────────────────────────────
+    if (mounted)
       setState(() {
         _previewLoading = true;
         _previewingId = videoId;
       });
-    }
 
     try {
-      // Always fetch fresh URL — YT stream URLs expire
       final url = await _svc.getPreviewUrl(videoId);
       if (url == null || url.isEmpty) {
-        throw Exception('No audio stream available for this video');
+        throw Exception('No audio stream available');
       }
       if (!mounted) return;
 
-      // Fresh player instance every time
+      // Fresh AudioPlayer — never reuse
       _preview = AudioPlayer();
 
-      // Listen for completion
-      _previewSub = _preview!.playerStateStream.listen((state) {
+      // Listen for natural end
+      _preview!.playerStateStream.listen((state) {
         if (state.processingState == ProcessingState.completed) {
-          if (mounted) {
+          _preview?.dispose();
+          _preview = null;
+          if (mounted)
             setState(() {
               _previewingId = null;
               _previewLoading = false;
             });
-          }
-          _preview?.dispose();
-          _preview = null;
         }
       });
 
-      // Set URL with timeout
-      await _preview!.setUrl(url).timeout(
-            const Duration(seconds: 15),
-            onTimeout: () =>
-                throw TimeoutException('Preview timed out — try again'),
-          );
-
+      await _preview!.setUrl(url);
       await _preview!.play();
       if (mounted) setState(() => _previewLoading = false);
     } catch (e) {
       debugPrint('Preview error: $e');
-      _previewSub?.cancel();
       _preview?.dispose();
       _preview = null;
-      _previewSub = null;
       if (mounted) {
         setState(() {
           _previewingId = null;
           _previewLoading = false;
         });
-        Get.snackbar(
-          'Preview failed',
-          e is TimeoutException
-              ? e.message ?? 'Timed out'
-              : 'Could not load preview',
-          backgroundColor: AppTheme.surface,
-          colorText: Colors.white,
-          duration: const Duration(seconds: 3),
-          snackPosition: SnackPosition.BOTTOM,
-        );
+        Get.snackbar('Preview unavailable',
+            'Could not stream this track. Try downloading it instead.',
+            backgroundColor: AppTheme.surface,
+            colorText: Colors.white,
+            duration: const Duration(seconds: 3),
+            snackPosition: SnackPosition.BOTTOM);
       }
     }
   }
