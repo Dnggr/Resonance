@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:audio_service/audio_service.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
@@ -6,6 +7,7 @@ import 'package:just_audio/just_audio.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../../../core/theme/app_theme.dart';
+import '../../../core/services/audio_handler.dart';
 import '../../equalizer/controllers/equalizer_controller.dart';
 
 class SongFile {
@@ -23,7 +25,19 @@ class SongFile {
 enum LoopMode { none, one, all }
 
 class PlayerController extends GetxController {
-  final AudioPlayer player = AudioPlayer();
+  final AudioPlayer player;
+  final ResonanceAudioHandler? _handler;
+
+  // Default constructor (Step 1 — no audio_service)
+  PlayerController()
+      : player = AudioPlayer(),
+        _handler = null;
+
+  // Named constructor (Step 2 — with audio_service)
+  PlayerController.withHandler(
+      AudioPlayer sharedPlayer, ResonanceAudioHandler handler)
+      : player = sharedPlayer,
+        _handler = handler;
 
   RxList<SongFile> songs = <SongFile>[].obs;
   RxList<SongFile> filteredSongs = <SongFile>[].obs;
@@ -43,8 +57,6 @@ class PlayerController extends GetxController {
 
   final List<int> _shuffleHistory = [];
   int _shuffleHistoryIndex = -1;
-
-  // TRAP 2 FIX: only init EQ once per AudioPlayer instance lifetime
   bool _eqInitialized = false;
 
   DateTime _lastPositionUpdate = DateTime.now();
@@ -74,8 +86,7 @@ class PlayerController extends GetxController {
     } else {
       final q = query.toLowerCase();
       filteredSongs.assignAll(
-        songs.where((s) => s.name.toLowerCase().contains(q)).toList(),
-      );
+          songs.where((s) => s.name.toLowerCase().contains(q)).toList());
     }
   }
 
@@ -184,14 +195,20 @@ class PlayerController extends GetxController {
     if (queueIndex.value < 0 || queueIndex.value >= queue.length) return;
     final song = queue[queueIndex.value];
     try {
-      await player.setFilePath(song.path);
-      await player.play();
+      if (_handler != null) {
+        // Step 2: go through the handler so lock screen updates
+        final item = MediaItem(
+          id: song.path,
+          title: song.name,
+          album: song.ext.toUpperCase(),
+        );
+        await _handler!.playFile(song.path, item);
+      } else {
+        // Step 1: direct just_audio
+        await player.setFilePath(song.path);
+        await player.play();
+      }
 
-      // TRAP 1 + TRAP 2 FIX:
-      // - Only init EQ once (session ID doesn't change between songs)
-      // - Called AFTER setFilePath() so session ID exists
-      // - Fire-and-forget (no await) so playback isn't blocked (TRAP 7)
-      // - Wrapped in try/catch so EQ failure never crashes the player (TRAP 3)
       if (!_eqInitialized) {
         _initEqualizer();
       }
@@ -200,16 +217,14 @@ class PlayerController extends GetxController {
     }
   }
 
-  // Separate method so it can be fire-and-forget without lint warnings
   Future<void> _initEqualizer() async {
     try {
       final sessionId = await player.androidAudioSessionId;
-      if (sessionId == null) return; // device doesn't support it — silent fail
+      if (sessionId == null) return;
       final eq = Get.find<EqualizerController>();
       await eq.init(sessionId);
       _eqInitialized = true;
     } catch (e) {
-      // EQ not supported on this device — non-fatal, player keeps working
       debugPrint('EQ init skipped: $e');
     }
   }
@@ -240,9 +255,7 @@ class PlayerController extends GetxController {
       }
       int next = DateTime.now().millisecondsSinceEpoch % queue.length;
       if (queue.length > 1) {
-        while (next == queueIndex.value) {
-          next = (next + 1) % queue.length;
-        }
+        while (next == queueIndex.value) next = (next + 1) % queue.length;
       }
       _shuffleHistory.add(next);
       _shuffleHistoryIndex = _shuffleHistory.length - 1;
@@ -281,7 +294,13 @@ class PlayerController extends GetxController {
     if (idx >= 0) await playSong(idx);
   }
 
-  void togglePlay() => player.playing ? player.pause() : player.play();
+  void togglePlay() {
+    if (_handler != null) {
+      player.playing ? _handler!.pause() : _handler!.play();
+    } else {
+      player.playing ? player.pause() : player.play();
+    }
+  }
 
   void seek(double seconds) => player.seek(Duration(seconds: seconds.toInt()));
 
@@ -295,9 +314,7 @@ class PlayerController extends GetxController {
 
   void toggleShuffle() {
     shuffleEnabled.value = !shuffleEnabled.value;
-    if (shuffleEnabled.value) {
-      _resetShuffleHistory(queueIndex.value);
-    }
+    if (shuffleEnabled.value) _resetShuffleHistory(queueIndex.value);
   }
 
   void _resetShuffleHistory(int startIdx) {
@@ -349,7 +366,9 @@ class PlayerController extends GetxController {
 
   @override
   void onClose() {
-    player.dispose();
+    // Only dispose player if we own it (Step 1 / default constructor)
+    // In Step 2, _sharedPlayer is module-level and outlives the controller
+    if (_handler == null) player.dispose();
     super.onClose();
   }
 }
