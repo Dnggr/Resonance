@@ -10,23 +10,29 @@ dependencies:
   flutter:
     sdk: flutter
 
+  # ── Audio ─────────────────────────────────────────────────────
   just_audio: ^0.9.46
   audio_service: ^0.18.15
   audio_session: ^0.1.21
 
+  # ── Download ──────────────────────────────────────────────────
   youtube_explode_dart: ^2.5.3
   dio: ^5.7.0
 
+  # ── Notifications ─────────────────────────────────────────────
   flutter_local_notifications: ^17.2.4
 
+  # ── Storage / Permissions ─────────────────────────────────────
   path_provider: ^2.1.4
   permission_handler: ^11.4.0
 
+  # ── State / Persistence ───────────────────────────────────────
   get: ^4.6.6
   hive: ^2.2.3
   hive_flutter: ^1.1.0
   uuid: ^4.4.0
 
+  # ── UI ────────────────────────────────────────────────────────
   cached_network_image: ^3.3.1
   cupertino_icons: ^1.0.8
 

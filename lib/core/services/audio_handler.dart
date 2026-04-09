@@ -1,5 +1,6 @@
+// lib/core/services/audio_handler.dart
 import 'package:audio_service/audio_service.dart';
-import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:get/get.dart';
 import 'package:just_audio/just_audio.dart';
 import '../../features/player/controllers/player_controller.dart';
@@ -8,10 +9,9 @@ class ResonanceAudioHandler extends BaseAudioHandler
     with QueueHandler, SeekHandler {
   final AudioPlayer player;
 
-  // Player is passed in — handler does not create its own AudioPlayer.
-  // This is critical: the EQ session ID must come from the SAME player
-  // instance that is used for playback. If the handler created its own
-  // player, the session IDs would differ and EQ would affect nothing.
+  // Player is passed in — NOT created here.
+  // Handler and PlayerController share the exact same instance
+  // so EQ audio session IDs always match.
   ResonanceAudioHandler(this.player) {
     _init();
   }
@@ -23,8 +23,6 @@ class ResonanceAudioHandler extends BaseAudioHandler
         debugPrint('AudioHandler stream error: $e');
       },
     );
-
-    // When just_audio reaches end of track, trigger next
     player.processingStateStream.listen((state) {
       if (state == ProcessingState.completed) skipToNext();
     });
@@ -33,8 +31,9 @@ class ResonanceAudioHandler extends BaseAudioHandler
   void _broadcastState(PlaybackEvent event) {
     final playing = player.playing;
 
-    // TRAP 5 FIX: use player.processingState as the map key,
-    // not a hardcoded ProcessingState.idle
+    // TRAP FIX: use player.processingState as the map key.
+    // Previous version hardcoded ProcessingState.idle which made the
+    // notification always show "loading" state regardless of actual state.
     final processingState = {
           ProcessingState.idle: AudioProcessingState.idle,
           ProcessingState.loading: AudioProcessingState.loading,
@@ -65,7 +64,9 @@ class ResonanceAudioHandler extends BaseAudioHandler
   }
 
   // Earphone button routing:
-  // Single tap = play/pause, double tap = next, triple tap = prev
+  // Single tap  → play/pause
+  // Double tap  → next
+  // Triple tap  → prev
   @override
   Future<void> click([MediaButton button = MediaButton.media]) async {
     switch (button) {
@@ -83,10 +84,8 @@ class ResonanceAudioHandler extends BaseAudioHandler
 
   @override
   Future<void> play() => player.play();
-
   @override
   Future<void> pause() => player.pause();
-
   @override
   Future<void> seek(Duration pos) => player.seek(pos);
 
@@ -98,7 +97,8 @@ class ResonanceAudioHandler extends BaseAudioHandler
 
   @override
   Future<void> skipToNext() async {
-    // Typed find — no dynamic, no silent failures
+    // Typed find — crashes loudly if PlayerController not registered
+    // instead of silently doing nothing
     try {
       Get.find<PlayerController>().playNext();
     } catch (e) {
@@ -115,8 +115,7 @@ class ResonanceAudioHandler extends BaseAudioHandler
     }
   }
 
-  /// Call this whenever you want to load + play a new file.
-  /// Updates the lock screen / notification metadata.
+  /// Load a file and update the lock screen / notification metadata
   Future<void> playFile(String path, MediaItem item) async {
     mediaItem.add(item);
     await player.setFilePath(path);

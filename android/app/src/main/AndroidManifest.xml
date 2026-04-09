@@ -2,17 +2,28 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.resonance.resonance">
 
+    <!-- Network -->
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+
+    <!-- Required by audio_service for background playback -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
+
+    <!-- Download notifications -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+
+    <!-- EQ / audio effects -->
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
+
+    <!-- Storage: Android 9 and below -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="29"/>
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32"/>
+
+    <!-- Storage: Android 13+ -->
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"/>
 
     <application
@@ -21,6 +32,10 @@
         android:icon="@mipmap/ic_launcher"
         android:requestLegacyExternalStorage="true">
 
+        <!--
+            CRITICAL: android:launchMode="singleTop" is required by audio_service.
+            Without it, tapping the notification opens a second activity instance.
+        -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -38,7 +53,10 @@
             </intent-filter>
         </activity>
 
-        <!-- audio_service background foreground service -->
+        <!--
+            CRITICAL: foregroundServiceType="mediaPlayback" is required on Android 10+.
+            Without it, the foreground service throws on API 29+.
+        -->
         <service
             android:name="com.ryanheise.audioservice.AudioService"
             android:foregroundServiceType="mediaPlayback"
@@ -48,7 +66,7 @@
             </intent-filter>
         </service>
 
-        <!-- Earphone / headset button receiver -->
+        <!-- Handles earphone/headset media buttons -->
         <receiver
             android:name="com.ryanheise.audioservice.MediaButtonReceiver"
             android:exported="true">
@@ -60,5 +78,6 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2"/>
+
     </application>
 </manifest>

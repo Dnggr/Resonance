@@ -1,3 +1,4 @@
+// lib/features/player/controllers/player_controller.dart
 import 'dart:io';
 import 'package:audio_service/audio_service.dart';
 import 'package:flutter/foundation.dart';
@@ -28,15 +29,16 @@ class PlayerController extends GetxController {
   final AudioPlayer player;
   final ResonanceAudioHandler? _handler;
 
-  // Default constructor (Step 1 — no audio_service)
+  // Default constructor — no audio_service (kept for safety)
   PlayerController()
       : player = AudioPlayer(),
         _handler = null;
 
-  // Named constructor (Step 2 — with audio_service)
+  // Named constructor — with audio_service shared player + handler
   PlayerController.withHandler(
-      AudioPlayer sharedPlayer, ResonanceAudioHandler handler)
-      : player = sharedPlayer,
+    AudioPlayer sharedPlayer,
+    ResonanceAudioHandler handler,
+  )   : player = sharedPlayer,
         _handler = handler;
 
   RxList<SongFile> songs = <SongFile>[].obs;
@@ -57,6 +59,10 @@ class PlayerController extends GetxController {
 
   final List<int> _shuffleHistory = [];
   int _shuffleHistoryIndex = -1;
+
+  // EQ init guard — audio session ID doesn't change between songs
+  // on the same AudioPlayer instance, so we only need to init once.
+  // Re-initing causes a ~200ms audio glitch.
   bool _eqInitialized = false;
 
   DateTime _lastPositionUpdate = DateTime.now();
@@ -64,6 +70,7 @@ class PlayerController extends GetxController {
   @override
   void onInit() {
     super.onInit();
+    // Throttle position updates to 4/sec — prevents excessive Obx rebuilds
     player.positionStream.listen((p) {
       final now = DateTime.now();
       if (now.difference(_lastPositionUpdate).inMilliseconds >= 250) {
@@ -78,6 +85,8 @@ class PlayerController extends GetxController {
     });
     loadSongs();
   }
+
+  // ── Library filter ─────────────────────────────────────────────────────────
 
   void filterSongs(String query) {
     searchQuery.value = query;
@@ -100,6 +109,8 @@ class PlayerController extends GetxController {
         .toList();
   }
 
+  // ── Song scanning ──────────────────────────────────────────────────────────
+
   Future<void> loadSongs() async {
     isLoading.value = true;
     error.value = '';
@@ -120,6 +131,8 @@ class PlayerController extends GetxController {
       isLoading.value = false;
     }
   }
+
+  // ── Playback entry points ──────────────────────────────────────────────────
 
   Future<void> playSong(int indexInFiltered) async {
     if (indexInFiltered < 0 || indexInFiltered >= filteredSongs.length) return;
@@ -191,12 +204,14 @@ class PlayerController extends GetxController {
     }
   }
 
+  // ── Core playback ──────────────────────────────────────────────────────────
+
   Future<void> _playCurrentQueueItem() async {
     if (queueIndex.value < 0 || queueIndex.value >= queue.length) return;
     final song = queue[queueIndex.value];
     try {
       if (_handler != null) {
-        // Step 2: go through the handler so lock screen updates
+        // With audio_service: updates lock screen + notification
         final item = MediaItem(
           id: song.path,
           title: song.name,
@@ -204,11 +219,14 @@ class PlayerController extends GetxController {
         );
         await _handler!.playFile(song.path, item);
       } else {
-        // Step 1: direct just_audio
+        // Without audio_service: direct just_audio
         await player.setFilePath(song.path);
         await player.play();
       }
 
+      // Init EQ after first successful play.
+      // Fire-and-forget (no await) — EQ init must not block playback.
+      // _eqInitialized guard prevents re-init on every song change.
       if (!_eqInitialized) {
         _initEqualizer();
       }
@@ -219,13 +237,16 @@ class PlayerController extends GetxController {
 
   Future<void> _initEqualizer() async {
     try {
+      // androidAudioSessionId is only available after setFilePath() succeeds
+      // and only on Android. Returns null on iOS/desktop — handled safely.
       final sessionId = await player.androidAudioSessionId;
       if (sessionId == null) return;
       final eq = Get.find<EqualizerController>();
       await eq.init(sessionId);
       _eqInitialized = true;
     } catch (e) {
-      debugPrint('EQ init skipped: $e');
+      // EQ not supported on this device — player keeps working fine
+      debugPrint('EQ init skipped (non-fatal): $e');
     }
   }
 
@@ -366,12 +387,16 @@ class PlayerController extends GetxController {
 
   @override
   void onClose() {
-    // Only dispose player if we own it (Step 1 / default constructor)
-    // In Step 2, _sharedPlayer is module-level and outlives the controller
+    // Only dispose player if WE created it (default constructor).
+    // withHandler constructor uses _sharedPlayer which is module-level
+    // and must not be disposed here.
     if (_handler == null) player.dispose();
     super.onClose();
   }
 }
+
+// ── Isolate function — runs on a background thread ────────────────────────────
+// Must be a top-level function (not a method) for compute() to work.
 
 List<List<String>> _scanDirsIsolate(List<String> dirPaths) {
   final results = <List<String>>[];

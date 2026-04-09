@@ -1,3 +1,7 @@
+// android/app/src/main/kotlin/com/resonance/resonance/MainActivity.kt
+// MUST extend FlutterFragmentActivity — audio_service checks for this
+// at runtime and throws IllegalStateException if it finds FlutterActivity
+
 package com.resonance.resonance
 
 import io.flutter.embedding.android.FlutterFragmentActivity
