@@ -16,14 +16,21 @@ import 'features/player/controllers/player_controller.dart';
 import 'features/playlist/controllers/playlist_controller.dart';
 import 'features/equalizer/controllers/equalizer_controller.dart';
 
-// Process-level singletons — survive hot restart
+// ── Process-level singletons ────────────────────────────────────────────────
+// These survive hot restart. Never re-create them.
 bool _audioServiceInitialized = false;
 ResonanceAudioHandler? _audioHandler;
-// One AudioPlayer shared by handler + controller (EQ session ID must match)
+
+// One AudioPlayer shared by handler + controller.
+// TRAP: Do NOT create this inside a function or class — it must be
+// module-level so it's never garbage collected or recreated.
+// If you create a new AudioPlayer after EQ init, the session ID changes
+// and EQ stops working.
 final AudioPlayer _sharedPlayer = AudioPlayer();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
     statusBarColor: Colors.transparent,
     statusBarIconBrightness: Brightness.light,
@@ -35,11 +42,18 @@ void main() async {
   await Hive.openBox<PlaylistModel>('playlists');
   await Hive.openBox<DownloadRecord>('downloads');
 
-  // Register controllers that don't need audio_service right now.
-  // Downloader works even if audio fails.
+  // Register everything that does NOT need audio_service.
+  // These are safe to init before runApp().
+  // TRAP: Use isRegistered guard — hot restart can call main() again
+  // without clearing GetX, which would throw "already registered".
   if (!Get.isRegistered<DownloaderService>()) Get.put(DownloaderService());
   if (!Get.isRegistered<PlaylistController>()) Get.put(PlaylistController());
   if (!Get.isRegistered<EqualizerController>()) Get.put(EqualizerController());
+
+  // TRAP: Do NOT register PlayerController here.
+  // It needs the shared AudioPlayer + handler from audio_service.
+  // Registering it here with a plain AudioPlayer would create a SECOND
+  // AudioPlayer, and then withHandler() would fail with "already registered".
 
   runApp(const ResonanceApp());
 }
@@ -57,6 +71,11 @@ class ResonanceApp extends StatelessWidget {
   }
 }
 
+// ── AppBootstrap ────────────────────────────────────────────────────────────
+// Initializes audio_service AFTER the UI starts rendering.
+// Shows a spinner instead of freezing on the Flutter logo.
+// TRAP: Never call AudioService.init() in main() — it can hang
+// the splash screen for 5–12 seconds on first install.
 class AppBootstrap extends StatefulWidget {
   const AppBootstrap({super.key});
   @override
@@ -75,9 +94,13 @@ class _AppBootstrapState extends State<AppBootstrap> {
 
   Future<void> _boot() async {
     if (mounted) setState(() => _error = null);
+
     try {
-      // TRAP: Only init AudioService once — double-init throws
-      // "_cacheManager == null" assertion on hot restart
+      // ── TRAP: Singleton guard ──────────────────────────────────────────
+      // AudioService is a process-level singleton (not just app-level).
+      // Calling init() a second time (e.g. on hot restart) throws:
+      // "Failed assertion: '_cacheManager == null': is not true"
+      // The bool flag prevents this.
       if (!_audioServiceInitialized) {
         _audioHandler = await AudioService.init(
           builder: () => ResonanceAudioHandler(_sharedPlayer),
@@ -91,14 +114,19 @@ class _AppBootstrapState extends State<AppBootstrap> {
         ).timeout(
           const Duration(seconds: 12),
           onTimeout: () => throw Exception(
-            'audio_service timed out.\n'
-            'Fix: MainActivity must extend FlutterFragmentActivity\n'
-            'Fix: AndroidManifest needs foregroundServiceType="mediaPlayback"',
+            'audio_service init timed out (12s).\n\n'
+            'Most likely causes:\n'
+            '1. MainActivity still extends FlutterActivity\n'
+            '   → Change to FlutterFragmentActivity\n'
+            '2. AudioService not declared in AndroidManifest.xml\n'
+            '   → Add the <service> block with foregroundServiceType\n'
+            '3. Run: cd android && ./gradlew clean && cd .. && flutter clean',
           ),
         );
         _audioServiceInitialized = true;
       }
 
+      // Register PlayerController only after handler is confirmed ready
       if (!Get.isRegistered<PlayerController>()) {
         Get.put(PlayerController.withHandler(_sharedPlayer, _audioHandler!));
       }
@@ -106,21 +134,37 @@ class _AppBootstrapState extends State<AppBootstrap> {
       if (mounted) setState(() => _ready = true);
     } catch (e) {
       debugPrint('Boot error: $e');
-      // _cacheManager = service already running (hot restart) — recover silently
+
+      // ── TRAP: _cacheManager assertion = service already running ────────
+      // This happens on hot restart. The service is actually fine.
+      // Mark as initialized and proceed normally.
       if (e.toString().contains('_cacheManager')) {
         _audioServiceInitialized = true;
         if (!Get.isRegistered<PlayerController>() && _audioHandler != null) {
           Get.put(PlayerController.withHandler(_sharedPlayer, _audioHandler!));
+        } else if (!Get.isRegistered<PlayerController>()) {
+          // Handler ref lost on hot restart — fall back to no-service mode
+          Get.put(PlayerController());
         }
         if (mounted) setState(() => _ready = true);
         return;
       }
+
+      // ── TRAP: IllegalStateException = wrong Activity class ─────────────
+      // audio_service failed entirely. Register a fallback PlayerController
+      // WITHOUT audio_service so the library and search screens still work.
+      // The user loses lock-screen controls but the app doesn't crash.
+      if (!Get.isRegistered<PlayerController>()) {
+        Get.put(PlayerController()); // fallback: no background service
+      }
+
       if (mounted) setState(() => _error = e.toString());
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    // ── Error screen ──────────────────────────────────────────────────────
     if (_error != null) {
       return Scaffold(
         backgroundColor: AppTheme.background,
@@ -133,32 +177,63 @@ class _AppBootstrapState extends State<AppBootstrap> {
                 const Icon(Icons.error_outline_rounded,
                     color: AppTheme.accent, size: 56),
                 const SizedBox(height: 16),
-                const Text('Failed to start audio service',
-                    style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold),
-                    textAlign: TextAlign.center),
-                const SizedBox(height: 12),
+                const Text(
+                  'Audio service failed to start',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Music playback still works — lock screen controls unavailable',
+                  style: TextStyle(color: Colors.white38, fontSize: 12),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 16),
                 Container(
+                  width: double.infinity,
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
                     color: Colors.white.withOpacity(0.05),
                     borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: AppTheme.accent.withOpacity(0.3)),
                   ),
-                  child: Text(_error!,
-                      style:
-                          const TextStyle(color: Colors.white54, fontSize: 11),
-                      textAlign: TextAlign.left),
+                  child: Text(
+                    _error!,
+                    style: const TextStyle(
+                        color: Colors.white54,
+                        fontSize: 11,
+                        fontFamily: 'monospace'),
+                    textAlign: TextAlign.left,
+                  ),
                 ),
                 const SizedBox(height: 24),
-                ElevatedButton.icon(
-                  onPressed: _boot,
-                  icon: const Icon(Icons.refresh_rounded),
-                  label: const Text('Retry'),
-                  style: ElevatedButton.styleFrom(
-                      backgroundColor: AppTheme.primary,
-                      foregroundColor: Colors.white),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: [
+                    ElevatedButton.icon(
+                      onPressed: _boot,
+                      icon: const Icon(Icons.refresh_rounded, size: 18),
+                      label: const Text('Retry'),
+                      style: ElevatedButton.styleFrom(
+                          backgroundColor: AppTheme.primary,
+                          foregroundColor: Colors.white),
+                    ),
+                    // Continue without lock screen controls
+                    OutlinedButton.icon(
+                      onPressed: () {
+                        if (mounted) setState(() => _ready = true);
+                      },
+                      icon: const Icon(Icons.music_note_rounded,
+                          size: 18, color: Colors.white54),
+                      label: const Text('Continue anyway',
+                          style: TextStyle(color: Colors.white54)),
+                      style: OutlinedButton.styleFrom(
+                          side: const BorderSide(color: Colors.white24)),
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -167,16 +242,22 @@ class _AppBootstrapState extends State<AppBootstrap> {
       );
     }
 
+    // ── Loading screen ────────────────────────────────────────────────────
     if (!_ready) {
       return const Scaffold(
         backgroundColor: AppTheme.background,
         body: Center(
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            CircularProgressIndicator(color: AppTheme.primary),
-            SizedBox(height: 20),
-            Text('Starting Resonance...',
-                style: TextStyle(color: Colors.white38, fontSize: 14)),
-          ]),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              CircularProgressIndicator(color: AppTheme.primary),
+              SizedBox(height: 20),
+              Text(
+                'Starting Resonance...',
+                style: TextStyle(color: Colors.white38, fontSize: 14),
+              ),
+            ],
+          ),
         ),
       );
     }
@@ -185,6 +266,7 @@ class _AppBootstrapState extends State<AppBootstrap> {
   }
 }
 
+// ── MainShell ───────────────────────────────────────────────────────────────
 class MainShell extends StatefulWidget {
   const MainShell({super.key});
   @override
