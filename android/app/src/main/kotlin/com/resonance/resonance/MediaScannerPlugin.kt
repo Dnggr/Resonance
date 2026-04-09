@@ -1,4 +1,4 @@
-package com.resonance.app
+package com.resonance.resonance
 
 import android.media.MediaScannerConnection
 import io.flutter.embedding.engine.plugins.FlutterPlugin
@@ -6,6 +6,7 @@ import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 
 class MediaScannerPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
+
     private lateinit var channel: MethodChannel
     private lateinit var binding: FlutterPlugin.FlutterPluginBinding
 
@@ -22,7 +23,9 @@ class MediaScannerPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         if (call.method == "scanFile") {
             val path = call.argument<String>("path") ?: return result.success(null)
-            MediaScannerConnection.scanFile(binding.applicationContext, arrayOf(path), null) { _, _ -> }
+            MediaScannerConnection.scanFile(
+                binding.applicationContext, arrayOf(path), null
+            ) { _, _ -> }
             result.success(null)
         } else {
             result.notImplemented()

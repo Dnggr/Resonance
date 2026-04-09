@@ -1,4 +1,4 @@
-package com.resonance.app
+package com.resonance.resonance
 
 import android.media.audiofx.*
 import io.flutter.embedding.engine.plugins.FlutterPlugin
@@ -25,8 +25,6 @@ class EqualizerPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
-
-            // ── Init all effects for a given audio session ───────────
             "init" -> {
                 val sessionId = call.argument<Int>("sessionId") ?: 0
                 try {
@@ -40,83 +38,64 @@ class EqualizerPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     result.error("INIT_FAILED", e.message, null)
                 }
             }
-
-            // ── EQ ───────────────────────────────────────────────────
             "getNumBands" -> result.success(equalizer?.numberOfBands?.toInt() ?: 0)
-
             "getBandLevelRange" -> {
                 val range = equalizer?.bandLevelRange
-                result.success(listOf(range?.get(0)?.toInt() ?: -1500,
-                                      range?.get(1)?.toInt() ?: 1500))
+                result.success(listOf(
+                    range?.get(0)?.toInt() ?: -1500,
+                    range?.get(1)?.toInt() ?: 1500
+                ))
             }
-
             "getBandCenterFreq" -> {
                 val band = call.argument<Int>("band") ?: 0
                 result.success(equalizer?.getCenterFreq(band.toShort())?.toInt() ?: 0)
             }
-
             "getBandLevel" -> {
                 val band = call.argument<Int>("band") ?: 0
                 result.success(equalizer?.getBandLevel(band.toShort())?.toInt() ?: 0)
             }
-
             "setBandLevel" -> {
                 val band  = call.argument<Int>("band")  ?: 0
                 val level = call.argument<Int>("level") ?: 0
                 equalizer?.setBandLevel(band.toShort(), level.toShort())
                 result.success(null)
             }
-
             "setEqEnabled" -> {
                 val enabled = call.argument<Boolean>("enabled") ?: true
                 equalizer?.enabled = enabled
                 result.success(null)
             }
-
-            // ── Bass Boost ───────────────────────────────────────────
             "setBassBoost" -> {
-                val strength = call.argument<Int>("strength") ?: 0   // 0–1000
+                val strength = call.argument<Int>("strength") ?: 0
                 bassBoost?.setStrength(strength.toShort())
                 bassBoost?.enabled = strength > 0
                 result.success(null)
             }
-
             "getBassBoost" -> result.success(bassBoost?.roundedStrength?.toInt() ?: 0)
-
-            // ── Loudness Enhancer (Pre-amp / Gain) ───────────────────
             "setGain" -> {
-                val gain = call.argument<Int>("gain") ?: 0            // 0–1200 mB
+                val gain = call.argument<Int>("gain") ?: 0
                 loudnessEnhancer?.setTargetGain(gain)
                 loudnessEnhancer?.enabled = gain > 0
                 result.success(null)
             }
-
-            "getGain" -> result.success(
-                loudnessEnhancer?.targetGain?.toInt() ?: 0
-            )
-
-            // ── Virtualizer (Surround) ───────────────────────────────
+            "getGain" -> result.success(loudnessEnhancer?.targetGain?.toInt() ?: 0)
             "setVirtualizer" -> {
-                val strength = call.argument<Int>("strength") ?: 0    // 0–1000
+                val strength = call.argument<Int>("strength") ?: 0
                 virtualizer?.setStrength(strength.toShort())
                 virtualizer?.enabled = strength > 0
                 result.success(null)
             }
-
             "getVirtualizer" -> result.success(virtualizer?.roundedStrength?.toInt() ?: 0)
-
-            // ── Release ──────────────────────────────────────────────
             "release" -> { release(); result.success(null) }
-
             else -> result.notImplemented()
         }
     }
 
     private fun release() {
-        try { equalizer?.release() }       catch (_: Exception) {}
-        try { bassBoost?.release() }       catch (_: Exception) {}
+        try { equalizer?.release() }        catch (_: Exception) {}
+        try { bassBoost?.release() }        catch (_: Exception) {}
         try { loudnessEnhancer?.release() } catch (_: Exception) {}
-        try { virtualizer?.release() }     catch (_: Exception) {}
+        try { virtualizer?.release() }      catch (_: Exception) {}
         equalizer = null
         bassBoost = null
         loudnessEnhancer = null

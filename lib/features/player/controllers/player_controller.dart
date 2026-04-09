@@ -1,14 +1,15 @@
+// lib/features/player/controllers/player_controller.dart
+// Restored to original — no audio_service, just just_audio directly.
+// This is what was working before we added audio_service.
+
 import 'dart:io';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:flutter/material.dart';
 import '../../../core/theme/app_theme.dart';
-import 'package:audio_service/audio_service.dart';
-import '../../../core/services/audio_handler.dart';
-import '../../equalizer/controllers/equalizer_controller.dart';
 
 class SongFile {
   final String path;
@@ -25,20 +26,11 @@ class SongFile {
 enum LoopMode { none, one, all }
 
 class PlayerController extends GetxController {
-  final ResonanceAudioHandler _handler;
-  PlayerController(this._handler);
+  final AudioPlayer player = AudioPlayer();
 
-  // Use _handler.player instead of creating a new AudioPlayer
-  AudioPlayer get player => _handler.player;
-
-  // Full library
   RxList<SongFile> songs = <SongFile>[].obs;
-  // What's shown in library UI (filtered)
   RxList<SongFile> filteredSongs = <SongFile>[].obs;
-
-  // The ACTIVE queue — what's actually playing (playlist or full library)
   RxList<SongFile> queue = <SongFile>[].obs;
-  // Index within queue
   RxInt queueIndex = (-1).obs;
 
   RxBool isPlaying = false.obs;
@@ -55,7 +47,6 @@ class PlayerController extends GetxController {
   final List<int> _shuffleHistory = [];
   int _shuffleHistoryIndex = -1;
 
-  // Throttle position updates to 4/sec — prevents 10Hz Obx rebuilds
   DateTime _lastPositionUpdate = DateTime.now();
 
   @override
@@ -76,7 +67,6 @@ class PlayerController extends GetxController {
     loadSongs();
   }
 
-  // ─── Library filter ───────────────────────────────────────
   void filterSongs(String query) {
     searchQuery.value = query;
     if (query.trim().isEmpty) {
@@ -99,7 +89,6 @@ class PlayerController extends GetxController {
         .toList();
   }
 
-  // ─── Load songs ───────────────────────────────────────────
   Future<void> loadSongs() async {
     isLoading.value = true;
     error.value = '';
@@ -121,7 +110,6 @@ class PlayerController extends GetxController {
     }
   }
 
-  // ─── Play from library (sets queue = filteredSongs) ───────
   Future<void> playSong(int indexInFiltered) async {
     if (indexInFiltered < 0 || indexInFiltered >= filteredSongs.length) return;
     queue.assignAll(filteredSongs);
@@ -132,7 +120,6 @@ class PlayerController extends GetxController {
     await _playCurrentQueueItem();
   }
 
-  // ─── Play from playlist (sets queue = playlist songs) ─────
   Future<void> playFromPlaylist(
       List<SongFile> playlistSongs, int startIndex, String playlistName) async {
     if (startIndex < 0 || startIndex >= playlistSongs.length) return;
@@ -143,7 +130,6 @@ class PlayerController extends GetxController {
     await _playCurrentQueueItem();
   }
 
-  // ─── Play next (insert after current) ────────────────────
   void addToPlayNext(SongFile song) {
     if (queue.isEmpty) {
       queue.assignAll([song]);
@@ -171,7 +157,6 @@ class PlayerController extends GetxController {
         snackPosition: SnackPosition.BOTTOM);
   }
 
-  // ─── Reorder queue ────────────────────────────────────────
   void reorderQueue(int oldIndex, int newIndex) {
     if (newIndex > oldIndex) newIndex--;
     final currentPath = currentSong?.path;
@@ -195,24 +180,12 @@ class PlayerController extends GetxController {
     }
   }
 
-  // ─── Playback ─────────────────────────────────────────────
   Future<void> _playCurrentQueueItem() async {
     if (queueIndex.value < 0 || queueIndex.value >= queue.length) return;
-    final sessionId = _handler.player.androidAudioSessionId;
-    if (sessionId != null) {
-      try {
-        Get.find<EqualizerController>().init(sessionId);
-      } catch (_) {}
-    }
     final song = queue[queueIndex.value];
     try {
-      final item = MediaItem(
-        id: song.path,
-        title: song.name,
-        album: song.ext.toUpperCase(),
-        artUri: null,
-      );
-      await _handler.playFile(song.path, item);
+      await player.setFilePath(song.path);
+      await player.play();
     } catch (e) {
       error.value = 'Cannot play: ${song.name}';
     }
@@ -242,9 +215,7 @@ class PlayerController extends GetxController {
         _playCurrentQueueItem();
         return;
       }
-      int next;
-      final rng = DateTime.now().millisecondsSinceEpoch;
-      next = rng % queue.length;
+      int next = DateTime.now().millisecondsSinceEpoch % queue.length;
       if (queue.length > 1) {
         while (next == queueIndex.value) {
           next = (next + 1) % queue.length;
@@ -287,7 +258,7 @@ class PlayerController extends GetxController {
     if (idx >= 0) await playSong(idx);
   }
 
-  void togglePlay() => _handler.playing ? _handler.pause() : _handler.play();
+  void togglePlay() => player.playing ? player.pause() : player.play();
 
   void seek(double seconds) => player.seek(Duration(seconds: seconds.toInt()));
 
