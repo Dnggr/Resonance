@@ -1,8 +1,3 @@
-// lib/main.dart
-// STRATEGY: Remove audio_service completely for now.
-// Get the app working with just_audio directly.
-// We can add background service later once the app boots.
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
@@ -15,6 +10,7 @@ import 'features/downloader/screens/search_screen.dart';
 import 'features/downloader/services/downloader_service.dart';
 import 'features/player/controllers/player_controller.dart';
 import 'features/playlist/controllers/playlist_controller.dart';
+import 'features/equalizer/controllers/equalizer_controller.dart'; // ADD
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -30,10 +26,10 @@ void main() async {
   await Hive.openBox<PlaylistModel>('playlists');
   await Hive.openBox<DownloadRecord>('downloads');
 
-  // Register controllers BEFORE runApp — simple and reliable
   Get.put(PlayerController());
   Get.put(DownloaderService());
   Get.put(PlaylistController());
+  Get.put(EqualizerController()); // ADD
 
   runApp(const ResonanceApp());
 }

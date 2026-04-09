@@ -21,72 +21,96 @@ class EqualizerScreen extends StatelessWidget {
           onPressed: () => Get.back(),
         ),
         actions: [
-          Obx(() => Switch(
-                value: eq.enabled.value,
-                activeColor: AppTheme.primary,
-                onChanged: eq.setEnabled,
+          Obx(() => Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(eq.enabled.value ? 'On' : 'Off',
+                      style: TextStyle(
+                          color: eq.enabled.value
+                              ? AppTheme.primary
+                              : Colors.white38,
+                          fontSize: 13)),
+                  Switch(
+                    value: eq.enabled.value,
+                    activeColor: AppTheme.primary,
+                    onChanged: eq.setEnabled,
+                  ),
+                  const SizedBox(width: 4),
+                ],
               )),
-          const SizedBox(width: 8),
         ],
       ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          // ── Presets ─────────────────────────────────────────
-          _sectionTitle('Presets'),
-          const SizedBox(height: 10),
-          _PresetChips(eq: eq),
-          const SizedBox(height: 24),
+      body: Obx(() {
+        // Show a friendly message if EQ is not available on this device
+        // (e.g. some emulators, Bluetooth-only setups)
+        if (eq.numBands.value == 0) {
+          return const Center(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Icon(Icons.equalizer_rounded, size: 56, color: Colors.white12),
+              SizedBox(height: 12),
+              Text('EQ not initialized yet',
+                  style: TextStyle(color: Colors.white54, fontSize: 15)),
+              SizedBox(height: 6),
+              Text('Play a song first, then return here',
+                  style: TextStyle(color: Colors.white30, fontSize: 13)),
+            ]),
+          );
+        }
 
-          // ── EQ Bands ─────────────────────────────────────────
-          _sectionTitle('Equalizer'),
-          const SizedBox(height: 12),
-          _EQBands(eq: eq),
-          const SizedBox(height: 24),
-
-          // ── Bass Boost ────────────────────────────────────────
-          _sectionTitle('Bass Boost'),
-          const SizedBox(height: 8),
-          _EffectSlider(
-            label: 'Strength',
-            unit: '',
-            value: eq.bassBoost,
-            min: 0,
-            max: 1000,
-            color: Colors.deepOrangeAccent,
-            onChanged: (v) => eq.setBassBoost(v.round()),
-          ),
-          const SizedBox(height: 24),
-
-          // ── Pre-amp / Gain ────────────────────────────────────
-          _sectionTitle('Pre-amp (Gain)'),
-          const SizedBox(height: 8),
-          _EffectSlider(
-            label: 'Boost',
-            unit: ' mB',
-            value: eq.gain,
-            min: 0,
-            max: 1200,
-            color: AppTheme.primary,
-            onChanged: (v) => eq.setGain(v.round()),
-          ),
-          const SizedBox(height: 24),
-
-          // ── Virtualizer ───────────────────────────────────────
-          _sectionTitle('Virtualizer (Surround)'),
-          const SizedBox(height: 8),
-          _EffectSlider(
-            label: 'Strength',
-            unit: '',
-            value: eq.virtualizer,
-            min: 0,
-            max: 1000,
-            color: Colors.purpleAccent,
-            onChanged: (v) => eq.setVirtualizer(v.round()),
-          ),
-          const SizedBox(height: 32),
-        ]),
-      ),
+        return SingleChildScrollView(
+          padding: const EdgeInsets.all(16),
+          child:
+              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            _sectionTitle('Presets'),
+            const SizedBox(height: 10),
+            _PresetChips(eq: eq),
+            const SizedBox(height: 24),
+            _sectionTitle('Equalizer'),
+            const SizedBox(height: 12),
+            _EQBands(eq: eq),
+            const SizedBox(height: 24),
+            _sectionTitle('Bass Boost'),
+            const SizedBox(height: 8),
+            _EffectSlider(
+              label: 'Strength',
+              unit: '',
+              value: eq.bassBoost,
+              min: 0,
+              max: 1000,
+              color: Colors.deepOrangeAccent,
+              enabled: eq.enabled.value,
+              onChanged: (v) => eq.setBassBoost(v.round()),
+            ),
+            const SizedBox(height: 24),
+            _sectionTitle('Pre-amp (Gain)'),
+            const SizedBox(height: 8),
+            _EffectSlider(
+              label: 'Boost',
+              unit: ' mB',
+              value: eq.gain,
+              min: 0,
+              max: 1200,
+              color: AppTheme.primary,
+              enabled: eq.enabled.value,
+              onChanged: (v) => eq.setGain(v.round()),
+            ),
+            const SizedBox(height: 24),
+            _sectionTitle('Virtualizer (Surround)'),
+            const SizedBox(height: 8),
+            _EffectSlider(
+              label: 'Strength',
+              unit: '',
+              value: eq.virtualizer,
+              min: 0,
+              max: 1000,
+              color: Colors.purpleAccent,
+              enabled: eq.enabled.value,
+              onChanged: (v) => eq.setVirtualizer(v.round()),
+            ),
+            const SizedBox(height: 32),
+          ]),
+        );
+      }),
     );
   }
 
@@ -95,10 +119,10 @@ class EqualizerScreen extends StatelessWidget {
           color: Colors.white, fontWeight: FontWeight.bold, fontSize: 15));
 }
 
-// ── Preset chips ─────────────────────────────────────────────
 class _PresetChips extends StatelessWidget {
   final EqualizerController eq;
   const _PresetChips({required this.eq});
+
   @override
   Widget build(BuildContext context) {
     return Obx(() => Wrap(
@@ -107,7 +131,7 @@ class _PresetChips extends StatelessWidget {
           children: List.generate(eq.presets.length, (i) {
             final selected = eq.selectedPreset.value == i;
             return GestureDetector(
-              onTap: () => eq.applyPreset(i),
+              onTap: eq.enabled.value ? () => eq.applyPreset(i) : null,
               child: AnimatedContainer(
                 duration: const Duration(milliseconds: 200),
                 padding:
@@ -125,7 +149,11 @@ class _PresetChips extends StatelessWidget {
                 ),
                 child: Text(eq.presets[i].name,
                     style: TextStyle(
-                        color: selected ? AppTheme.primary : Colors.white54,
+                        color: !eq.enabled.value
+                            ? Colors.white24
+                            : selected
+                                ? AppTheme.primary
+                                : Colors.white54,
                         fontWeight:
                             selected ? FontWeight.bold : FontWeight.normal,
                         fontSize: 13)),
@@ -136,7 +164,6 @@ class _PresetChips extends StatelessWidget {
   }
 }
 
-// ── EQ Band Sliders ──────────────────────────────────────────
 class _EQBands extends StatelessWidget {
   final EqualizerController eq;
   const _EQBands({required this.eq});
@@ -145,13 +172,7 @@ class _EQBands extends StatelessWidget {
   Widget build(BuildContext context) {
     return Obx(() {
       final n = eq.numBands.value;
-      if (n == 0) {
-        return const Padding(
-          padding: EdgeInsets.symmetric(vertical: 16),
-          child: Text('EQ not available on this device',
-              style: TextStyle(color: Colors.white38)),
-        );
-      }
+      final isEnabled = eq.enabled.value;
       return Container(
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
@@ -174,11 +195,13 @@ class _EQBands extends StatelessWidget {
                 Text(
                   '${level > 0 ? '+' : ''}${(level / 100).toStringAsFixed(0)}',
                   style: TextStyle(
-                    color: level > 0
-                        ? AppTheme.primary
-                        : level < 0
-                            ? AppTheme.accent
-                            : Colors.white38,
+                    color: !isEnabled
+                        ? Colors.white24
+                        : level > 0
+                            ? AppTheme.primary
+                            : level < 0
+                                ? AppTheme.accent
+                                : Colors.white38,
                     fontSize: 10,
                     fontWeight: FontWeight.bold,
                   ),
@@ -194,16 +217,20 @@ class _EQBands extends StatelessWidget {
                         thumbShape:
                             const RoundSliderThumbShape(enabledThumbRadius: 7),
                         overlayShape: SliderComponentShape.noOverlay,
-                        activeTrackColor: AppTheme.primary,
+                        activeTrackColor:
+                            isEnabled ? AppTheme.primary : Colors.white24,
                         inactiveTrackColor: Colors.white12,
-                        thumbColor: AppTheme.primary,
+                        thumbColor:
+                            isEnabled ? AppTheme.primary : Colors.white24,
+                        disabledActiveTrackColor: Colors.white24,
+                        disabledThumbColor: Colors.white24,
                       ),
                       child: Slider(
                         value: level.toDouble().clamp(minL, maxL),
                         min: minL,
                         max: maxL,
                         divisions: ((maxL - minL) / 100).round(),
-                        onChanged: eq.enabled.value
+                        onChanged: isEnabled
                             ? (v) => eq.setBandLevel(i, v.round())
                             : null,
                       ),
@@ -222,7 +249,6 @@ class _EQBands extends StatelessWidget {
   }
 }
 
-// ── Generic effect slider ────────────────────────────────────
 class _EffectSlider extends StatelessWidget {
   final String label;
   final String unit;
@@ -230,6 +256,7 @@ class _EffectSlider extends StatelessWidget {
   final int min;
   final int max;
   final Color color;
+  final bool enabled;
   final Function(double) onChanged;
 
   const _EffectSlider({
@@ -239,6 +266,7 @@ class _EffectSlider extends StatelessWidget {
     required this.min,
     required this.max,
     required this.color,
+    required this.enabled,
     required this.onChanged,
   });
 
@@ -264,7 +292,7 @@ class _EffectSlider extends StatelessWidget {
                                   color: Colors.white54, fontSize: 12)),
                           Text('${value.value}$unit',
                               style: TextStyle(
-                                  color: color,
+                                  color: enabled ? color : Colors.white24,
                                   fontSize: 12,
                                   fontWeight: FontWeight.bold)),
                         ]),
@@ -275,15 +303,17 @@ class _EffectSlider extends StatelessWidget {
                         thumbShape:
                             const RoundSliderThumbShape(enabledThumbRadius: 7),
                         overlayShape: SliderComponentShape.noOverlay,
-                        activeTrackColor: color,
+                        activeTrackColor: enabled ? color : Colors.white24,
                         inactiveTrackColor: Colors.white12,
-                        thumbColor: color,
+                        thumbColor: enabled ? color : Colors.white24,
+                        disabledActiveTrackColor: Colors.white24,
+                        disabledThumbColor: Colors.white24,
                       ),
                       child: Slider(
                         value: value.value.toDouble(),
                         min: min.toDouble(),
                         max: max.toDouble(),
-                        onChanged: onChanged,
+                        onChanged: enabled ? onChanged : null,
                       ),
                     ),
                   ]),

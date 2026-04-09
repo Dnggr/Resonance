@@ -51,6 +51,12 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
           dividerColor: Colors.transparent,
         ),
         actions: [
+          // EQ button — navigates to EqualizerScreen
+          IconButton(
+            icon: const Icon(Icons.equalizer_rounded, color: Colors.white54),
+            tooltip: 'Equalizer',
+            onPressed: () => Get.to(() => const EqualizerScreen()),
+          ),
           Obx(() => ctrl.currentSong != null
               ? IconButton(
                   icon: const Icon(Icons.playlist_add_rounded,

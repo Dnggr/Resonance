@@ -1,7 +1,3 @@
-// lib/features/player/controllers/player_controller.dart
-// Restored to original — no audio_service, just just_audio directly.
-// This is what was working before we added audio_service.
-
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -10,6 +6,7 @@ import 'package:just_audio/just_audio.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../../../core/theme/app_theme.dart';
+import '../../equalizer/controllers/equalizer_controller.dart';
 
 class SongFile {
   final String path;
@@ -46,6 +43,9 @@ class PlayerController extends GetxController {
 
   final List<int> _shuffleHistory = [];
   int _shuffleHistoryIndex = -1;
+
+  // TRAP 2 FIX: only init EQ once per AudioPlayer instance lifetime
+  bool _eqInitialized = false;
 
   DateTime _lastPositionUpdate = DateTime.now();
 
@@ -138,12 +138,12 @@ class PlayerController extends GetxController {
       _playCurrentQueueItem();
       return;
     }
-    final insertAt = queueIndex.value + 1;
     final newQueue = List<SongFile>.from(queue);
     newQueue.removeWhere((s) => s.path == song.path);
     final newCurrentIdx =
         newQueue.indexWhere((s) => s.path == currentSong?.path);
-    final actualInsertAt = newCurrentIdx >= 0 ? newCurrentIdx + 1 : insertAt;
+    final actualInsertAt =
+        newCurrentIdx >= 0 ? newCurrentIdx + 1 : queueIndex.value + 1;
     newQueue.insert(actualInsertAt.clamp(0, newQueue.length), song);
     final currentPath = currentSong?.path;
     queue.assignAll(newQueue);
@@ -186,8 +186,31 @@ class PlayerController extends GetxController {
     try {
       await player.setFilePath(song.path);
       await player.play();
+
+      // TRAP 1 + TRAP 2 FIX:
+      // - Only init EQ once (session ID doesn't change between songs)
+      // - Called AFTER setFilePath() so session ID exists
+      // - Fire-and-forget (no await) so playback isn't blocked (TRAP 7)
+      // - Wrapped in try/catch so EQ failure never crashes the player (TRAP 3)
+      if (!_eqInitialized) {
+        _initEqualizer();
+      }
     } catch (e) {
       error.value = 'Cannot play: ${song.name}';
+    }
+  }
+
+  // Separate method so it can be fire-and-forget without lint warnings
+  Future<void> _initEqualizer() async {
+    try {
+      final sessionId = await player.androidAudioSessionId;
+      if (sessionId == null) return; // device doesn't support it — silent fail
+      final eq = Get.find<EqualizerController>();
+      await eq.init(sessionId);
+      _eqInitialized = true;
+    } catch (e) {
+      // EQ not supported on this device — non-fatal, player keeps working
+      debugPrint('EQ init skipped: $e');
     }
   }
 
