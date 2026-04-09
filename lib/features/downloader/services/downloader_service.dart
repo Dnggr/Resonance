@@ -8,6 +8,7 @@ import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 import '../../../core/models/download_record.dart';
 import '../../../core/utils/media_scanner.dart';
 import '../../../core/theme/app_theme.dart';
+import '../../../core/services/notification_service.dart';
 
 enum DownloadFormat { mp3, m4a, flac }
 
@@ -177,6 +178,7 @@ class DownloaderService extends GetxController {
         return;
       }
 
+      final notifId = (task.videoId + task.formatLabel).hashCode.abs() % 100000;
       final saveDir = await _getMusicDir();
       final safeName = _sanitize(task.title);
       final ext = _extFor(task.format);
@@ -223,7 +225,7 @@ class DownloaderService extends GetxController {
       if (await file.exists()) {
         existingBytes = await file.length();
         if (totalBytes > 0 && existingBytes >= totalBytes) {
-          await _completeTask(task, filePath);
+          await _completeTask(task, filePath, notifId);
           return;
         }
       }
@@ -271,6 +273,17 @@ class DownloaderService extends GetxController {
                 '${task.speed.value} · ${_fmtBytes(downloaded)}/${_fmtBytes(totalBytes)}';
             lastBytes = downloaded;
             lastTime = now;
+
+            // 🔔 Update notification
+            final pct =
+                totalBytes > 0 ? ((downloaded / totalBytes) * 100).round() : -1;
+
+            NotificationService.showDownloadProgress(
+              id: notifId,
+              title: task.title,
+              author: task.author,
+              percent: pct,
+            );
           }
         }
         await sink.flush();
@@ -283,7 +296,7 @@ class DownloaderService extends GetxController {
         rethrow;
       }
 
-      await _completeTask(task, filePath);
+      await _completeTask(task, filePath, notifId);
     } catch (e) {
       // Clean up partial/empty file — don't pollute library
       if (filePath != null) {
@@ -300,7 +313,8 @@ class DownloaderService extends GetxController {
     }
   }
 
-  Future<void> _completeTask(DownloadTask task, String filePath) async {
+  Future<void> _completeTask(
+      DownloadTask task, String filePath, int notifId) async {
     await MediaScanner.scanFile(filePath);
     task.filePath = filePath;
     task.progress.value = 1.0;
@@ -316,6 +330,16 @@ class DownloaderService extends GetxController {
       filePath: filePath,
       format: task.formatLabel,
       downloadedAt: DateTime.now(),
+    );
+    await NotificationService.showDownloadDone(
+      id: notifId,
+      title: task.title,
+      format: task.formatLabel,
+    );
+    await NotificationService.showDownloadDone(
+      id: notifId,
+      title: task.title,
+      format: task.formatLabel,
     );
     await _historyBox.put(task.videoId + task.formatLabel, record);
     downloadHistory.insert(0, record);
@@ -350,6 +374,7 @@ class DownloaderService extends GetxController {
   }
 
   void cancelTask(DownloadTask task) {
+    final notifId = (task.videoId + task.formatLabel).hashCode.abs() % 100000;
     task.cancel();
     if (task.filePath != null) {
       try {
@@ -358,6 +383,7 @@ class DownloaderService extends GetxController {
       } catch (_) {}
     }
     activeDownloads.remove(task);
+    NotificationService.cancel(notifId);
   }
 
   Future<void> deleteHistoryRecord(DownloadRecord record) async {

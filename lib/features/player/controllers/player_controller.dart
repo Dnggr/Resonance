@@ -6,6 +6,9 @@ import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter/material.dart';
 import '../../../core/theme/app_theme.dart';
+import 'package:audio_service/audio_service.dart';
+import '../../../core/services/audio_handler.dart';
+import '../../equalizer/controllers/equalizer_controller.dart';
 
 class SongFile {
   final String path;
@@ -22,7 +25,11 @@ class SongFile {
 enum LoopMode { none, one, all }
 
 class PlayerController extends GetxController {
-  final AudioPlayer player = AudioPlayer();
+  final ResonanceAudioHandler _handler;
+  PlayerController(this._handler);
+
+  // Use _handler.player instead of creating a new AudioPlayer
+  AudioPlayer get player => _handler.player;
 
   // Full library
   RxList<SongFile> songs = <SongFile>[].obs;
@@ -191,10 +198,21 @@ class PlayerController extends GetxController {
   // ─── Playback ─────────────────────────────────────────────
   Future<void> _playCurrentQueueItem() async {
     if (queueIndex.value < 0 || queueIndex.value >= queue.length) return;
+    final sessionId = _handler.player.androidAudioSessionId;
+    if (sessionId != null) {
+      try {
+        Get.find<EqualizerController>().init(sessionId);
+      } catch (_) {}
+    }
     final song = queue[queueIndex.value];
     try {
-      await player.setFilePath(song.path);
-      await player.play();
+      final item = MediaItem(
+        id: song.path,
+        title: song.name,
+        album: song.ext.toUpperCase(),
+        artUri: null,
+      );
+      await _handler.playFile(song.path, item);
     } catch (e) {
       error.value = 'Cannot play: ${song.name}';
     }
@@ -269,7 +287,7 @@ class PlayerController extends GetxController {
     if (idx >= 0) await playSong(idx);
   }
 
-  void togglePlay() => player.playing ? player.pause() : player.play();
+  void togglePlay() => _handler.playing ? _handler.pause() : _handler.play();
 
   void seek(double seconds) => player.seek(Duration(seconds: seconds.toInt()));
 

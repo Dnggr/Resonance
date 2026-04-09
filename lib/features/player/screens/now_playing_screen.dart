@@ -3,6 +3,7 @@ import 'package:get/get.dart';
 import '../../../core/theme/app_theme.dart';
 import '../controllers/player_controller.dart';
 import '../../playlist/controllers/playlist_controller.dart';
+import '../../equalizer/screens/equalizer_screen.dart';
 
 class NowPlayingScreen extends StatefulWidget {
   const NowPlayingScreen({super.key});
@@ -34,9 +35,8 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         leading: IconButton(
-          icon: const Icon(Icons.keyboard_arrow_down_rounded,
-              color: Colors.white, size: 32),
-          onPressed: () => Get.back(),
+          icon: const Icon(Icons.equalizer_rounded, color: Colors.white54),
+          onPressed: () => Get.to(() => const EqualizerScreen()),
         ),
         title: TabBar(
           controller: _tabCtrl,
@@ -171,10 +171,10 @@ class _AlbumArt extends StatelessWidget {
       decoration: BoxDecoration(
         color: AppTheme.surface,
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: AppTheme.primary.withOpacity(0.3)),
+        border: Border.all(color: AppTheme.primary..withValues(alpha: 0.3)),
         boxShadow: [
           BoxShadow(
-              color: AppTheme.primary.withOpacity(0.2),
+              color: AppTheme.primary..withValues(alpha: 0.2),
               blurRadius: 40,
               offset: const Offset(0, 8))
         ],

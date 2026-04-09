@@ -5,11 +5,16 @@ import 'package:hive_flutter/hive_flutter.dart';
 import 'core/models/playlist_model.dart';
 import 'core/models/download_record.dart';
 import 'core/theme/app_theme.dart';
+import 'core/services/audio_handler.dart';
+import 'core/services/notification_service.dart';
 import 'features/player/screens/player_screen.dart';
 import 'features/downloader/screens/search_screen.dart';
 import 'features/downloader/services/downloader_service.dart';
 import 'features/player/controllers/player_controller.dart';
 import 'features/playlist/controllers/playlist_controller.dart';
+import 'features/equalizer/controllers/equalizer_controller.dart';
+
+late ResonanceAudioHandler audioHandler;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -17,17 +22,24 @@ void main() async {
     statusBarColor: Colors.transparent,
     statusBarIconBrightness: Brightness.light,
   ));
+
   await Hive.initFlutter();
   Hive.registerAdapter(PlaylistModelAdapter());
   Hive.registerAdapter(DownloadRecordAdapter());
   await Hive.openBox<PlaylistModel>('playlists');
   await Hive.openBox<DownloadRecord>('downloads');
+
+  // Init audio_service (background + notification controls)
+  audioHandler = await initAudioService();
+
+  // Init local notifications (download progress)
+  await NotificationService.init();
+
   runApp(const ResonanceApp());
 }
 
 class ResonanceApp extends StatelessWidget {
   const ResonanceApp({super.key});
-
   @override
   Widget build(BuildContext context) {
     return GetMaterialApp(
@@ -47,9 +59,16 @@ class MainShell extends StatefulWidget {
 
 class _MainShellState extends State<MainShell> {
   int _index = 0;
-  final PlayerController _playerCtrl = Get.put(PlayerController());
-  final DownloaderService _dlSvc = Get.put(DownloaderService());
-  final PlaylistController _playlistCtrl = Get.put(PlaylistController());
+  late final PlayerController _playerCtrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _playerCtrl = Get.put(PlayerController(audioHandler));
+    Get.put(DownloaderService());
+    Get.put(PlaylistController());
+    Get.put(EqualizerController());
+  }
 
   final List<Widget> _screens = const [
     PlayerScreen(),
