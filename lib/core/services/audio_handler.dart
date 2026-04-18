@@ -9,37 +9,31 @@ class ResonanceAudioHandler extends BaseAudioHandler
     with QueueHandler, SeekHandler {
   final AudioPlayer player;
 
-  // Player is passed in — NOT created here.
-  // Handler and PlayerController share the exact same instance
-  // so EQ audio session IDs always match.
   ResonanceAudioHandler(this.player) {
     _init();
   }
 
   void _init() {
-    // ── FIX: Listen to playback events and broadcast them ─────────────────
-    // This is what drives the lock-screen / notification controls.
+    // ── FIX: Use a single combined stream for all state broadcasts ─────────
+    // Previously two listeners (playbackEventStream + playingStream) both
+    // called _broadcastState, causing double-fire on every play/pause.
+    // Double-fire is harmless BUT it can confuse the notification system
+    // on some Android versions, causing the controls to flicker or not update.
+    //
+    // just_audio's playbackEventStream fires on EVERY state change including
+    // play/pause/seek/buffer — so it's the only listener we need.
     player.playbackEventStream.listen(
       _broadcastState,
       onError: (Object e, StackTrace st) {
-        debugPrint('AudioHandler stream error: $e');
+        debugPrint('AudioHandler playbackEventStream error: $e');
       },
     );
 
-    // ── FIX: Also listen to playing state changes separately ──────────────
-    // playbackEventStream doesn't always fire on play/pause toggles alone.
-    player.playingStream.listen((_) {
-      _broadcastState(
-        PlaybackEvent(
-          processingState: player.processingState,
-          updatePosition: player.position,
-          bufferedPosition: player.bufferedPosition,
-        ),
-      );
-    });
-
+    // Track completion to auto-advance
     player.processingStateStream.listen((state) {
-      if (state == ProcessingState.completed) skipToNext();
+      if (state == ProcessingState.completed) {
+        skipToNext();
+      }
     });
   }
 
@@ -77,10 +71,6 @@ class ResonanceAudioHandler extends BaseAudioHandler
     ));
   }
 
-  // Earphone button routing:
-  // Single tap  → play/pause
-  // Double tap  → next
-  // Triple tap  → prev
   @override
   Future<void> click([MediaButton button = MediaButton.media]) async {
     switch (button) {
@@ -98,8 +88,10 @@ class ResonanceAudioHandler extends BaseAudioHandler
 
   @override
   Future<void> play() => player.play();
+
   @override
   Future<void> pause() => player.pause();
+
   @override
   Future<void> seek(Duration pos) => player.seek(pos);
 
@@ -127,15 +119,15 @@ class ResonanceAudioHandler extends BaseAudioHandler
     }
   }
 
-  /// Load a file and update the lock screen / notification metadata.
-  /// This is the primary entry point for playing a song WITH notification support.
+  /// Set the song metadata on the notification + lock screen,
+  /// then load and play the file.
+  ///
+  /// ── FIX: mediaItem is set BEFORE setFilePath() ─────────────────────────
+  /// Android reads mediaItem to populate the notification. If we set it after
+  /// loading starts, there's a window where the notification shows blank/stale
+  /// info. Setting it first ensures the notification always has correct data.
   Future<void> playFile(String path, MediaItem item) async {
-    // ── FIX: Update mediaItem BEFORE setting the file path ────────────────
-    // audio_service needs this to display song info on the lock screen.
-    // Setting it after setFilePath() causes a race where the notification
-    // shows blank or stale info on the first play.
     mediaItem.add(item);
-
     await player.setFilePath(path);
     await player.play();
   }

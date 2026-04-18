@@ -17,16 +17,12 @@ import 'features/player/controllers/player_controller.dart';
 import 'features/playlist/controllers/playlist_controller.dart';
 import 'features/equalizer/controllers/equalizer_controller.dart';
 
-// ── Process-level singletons ────────────────────────────────────────────────
-// These survive hot restart. Never re-create them.
+// ── Process-level singletons ─────────────────────────────────────────────────
+// Survive hot restart. Never re-create.
 bool _audioServiceInitialized = false;
 ResonanceAudioHandler? _audioHandler;
 
-// One AudioPlayer shared by handler + controller.
-// TRAP: Do NOT create this inside a function or class — it must be
-// module-level so it's never garbage collected or recreated.
-// If you create a new AudioPlayer after EQ init, the session ID changes
-// and EQ stops working.
+// Shared player: module-level so it's never GC'd and EQ session stays stable.
 final AudioPlayer _sharedPlayer = AudioPlayer();
 
 void main() async {
@@ -43,7 +39,6 @@ void main() async {
   await Hive.openBox<PlaylistModel>('playlists');
   await Hive.openBox<DownloadRecord>('downloads');
 
-  // Register everything that does NOT need audio_service.
   if (!Get.isRegistered<DownloaderService>()) Get.put(DownloaderService());
   if (!Get.isRegistered<PlaylistController>()) Get.put(PlaylistController());
   if (!Get.isRegistered<EqualizerController>()) Get.put(EqualizerController());
@@ -64,7 +59,7 @@ class ResonanceApp extends StatelessWidget {
   }
 }
 
-// ── AppBootstrap ────────────────────────────────────────────────────────────
+// ── AppBootstrap ─────────────────────────────────────────────────────────────
 class AppBootstrap extends StatefulWidget {
   const AppBootstrap({super.key});
   @override
@@ -82,42 +77,44 @@ class _AppBootstrapState extends State<AppBootstrap> {
   }
 
   Future<void> _boot() async {
-    // Clear error state when retrying
-    if (mounted) setState(() => _error = null);
+    if (mounted)
+      setState(() {
+        _error = null;
+      });
 
     try {
       if (!_audioServiceInitialized) {
         _audioHandler = await AudioService.init(
           builder: () => ResonanceAudioHandler(_sharedPlayer),
-          config: const AudioServiceConfig(
+          config: AudioServiceConfig(
             androidNotificationChannelId: 'com.resonance.audio',
             androidNotificationChannelName: 'Resonance Player',
             androidNotificationOngoing: true,
             androidShowNotificationBadge: true,
             androidNotificationIcon: 'mipmap/ic_launcher',
+            // ── FIX: These two flags are critical for lock screen controls ──
+            // notificationColor tints the notification on older Android.
+            // androidStopForegroundOnPause: false keeps it alive when paused,
+            // so the user can resume from notification without reopening app.
+            androidStopForegroundOnPause: false,
           ),
         ).timeout(
-          const Duration(seconds: 12),
-          onTimeout: () => throw Exception(
-            'audio_service init timed out (12s).\n\n'
-            'Most likely causes:\n'
-            '1. MainActivity still extends FlutterActivity\n'
-            '   → Change to FlutterFragmentActivity\n'
-            '2. AudioService not declared in AndroidManifest.xml\n'
-            '   → Add the <service> block with foregroundServiceType\n'
-            '3. Run: cd android && ./gradlew clean && cd .. && flutter clean',
-          ),
+          const Duration(seconds: 15),
+          onTimeout: () => throw Exception('audio_service init timed out'),
         );
+
         _audioServiceInitialized = true;
 
-        // ── FIX: Configure audio session for proper media notification ──────
-        // Without this, Android won't show the media notification correctly
-        // on lock screen and the system doesn't know we're a music player.
+        // ── FIX: Configure AudioSession for music ─────────────────────────
+        // This tells Android this is a music-category app, which:
+        // 1. Shows the media notification with lock screen controls
+        // 2. Allows other apps to duck audio (e.g. navigation)
+        // 3. Resumes/pauses on headphone connect/disconnect
+        // Without this call, the notification shows but controls are inactive.
         final session = await AudioSession.instance;
         await session.configure(const AudioSessionConfiguration.music());
       }
 
-      // Register PlayerController only after handler is confirmed ready
       if (!Get.isRegistered<PlayerController>()) {
         Get.put(PlayerController.withHandler(_sharedPlayer, _audioHandler!));
       }
@@ -126,21 +123,22 @@ class _AppBootstrapState extends State<AppBootstrap> {
     } catch (e) {
       debugPrint('Boot error: $e');
 
-      // ── TRAP: _cacheManager assertion = service already running ────────
-      // This happens on hot restart. The service is actually fine.
+      // Hot-restart: service already running — treat as success
       if (e.toString().contains('_cacheManager')) {
         _audioServiceInitialized = true;
-        if (!Get.isRegistered<PlayerController>() && _audioHandler != null) {
-          Get.put(PlayerController.withHandler(_sharedPlayer, _audioHandler!));
-        } else if (!Get.isRegistered<PlayerController>()) {
-          Get.put(PlayerController());
+        if (!Get.isRegistered<PlayerController>()) {
+          if (_audioHandler != null) {
+            Get.put(
+                PlayerController.withHandler(_sharedPlayer, _audioHandler!));
+          } else {
+            Get.put(PlayerController());
+          }
         }
         if (mounted) setState(() => _ready = true);
         return;
       }
 
-      // Audio service failed — register fallback controller so app still works.
-      // User loses lock-screen controls but playback still functions.
+      // Real failure — register fallback controller so app still works
       if (!Get.isRegistered<PlayerController>()) {
         Get.put(PlayerController());
       }
@@ -149,8 +147,6 @@ class _AppBootstrapState extends State<AppBootstrap> {
     }
   }
 
-  // ── FIX: Continue button now correctly transitions to ready state ──────────
-  // Previously the error was still shown because _error wasn't cleared.
   void _continueWithoutService() {
     if (mounted)
       setState(() {
@@ -171,8 +167,8 @@ class _AppBootstrapState extends State<AppBootstrap> {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                const Icon(Icons.error_outline_rounded,
-                    color: AppTheme.accent, size: 56),
+                const Icon(Icons.warning_amber_rounded,
+                    color: Colors.orangeAccent, size: 56),
                 const SizedBox(height: 16),
                 const Text(
                   'Audio service failed to start',
@@ -184,36 +180,15 @@ class _AppBootstrapState extends State<AppBootstrap> {
                 ),
                 const SizedBox(height: 8),
                 const Text(
-                  'Music playback still works — lock screen controls unavailable',
-                  style: TextStyle(color: Colors.white38, fontSize: 12),
+                  'Music playback still works.\nLock screen controls may be unavailable.',
+                  style: TextStyle(color: Colors.white54, fontSize: 13),
                   textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 16),
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.05),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: AppTheme.accent.withOpacity(0.3)),
-                  ),
-                  child: Text(
-                    _error!,
-                    style: const TextStyle(
-                        color: Colors.white54,
-                        fontSize: 11,
-                        fontFamily: 'monospace'),
-                    textAlign: TextAlign.left,
-                  ),
                 ),
                 const SizedBox(height: 24),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                   children: [
                     ElevatedButton.icon(
-                      // FIX: _boot() now clears _error before retrying,
-                      // so Retry no longer immediately jumps to MainShell.
-                      // It shows the loading spinner while re-attempting init.
                       onPressed: _boot,
                       icon: const Icon(Icons.refresh_rounded, size: 18),
                       label: const Text('Retry'),
@@ -221,15 +196,38 @@ class _AppBootstrapState extends State<AppBootstrap> {
                           backgroundColor: AppTheme.primary,
                           foregroundColor: Colors.white),
                     ),
-                    // FIX: Continue now correctly sets _error = null + _ready = true
                     OutlinedButton.icon(
                       onPressed: _continueWithoutService,
                       icon: const Icon(Icons.music_note_rounded,
                           size: 18, color: Colors.white54),
-                      label: const Text('Continue anyway',
+                      label: const Text('Continue',
                           style: TextStyle(color: Colors.white54)),
                       style: OutlinedButton.styleFrom(
                           side: const BorderSide(color: Colors.white24)),
+                    ),
+                  ],
+                ),
+                // ── Show technical error in collapsed section ─────────────
+                const SizedBox(height: 20),
+                ExpansionTile(
+                  tilePadding: EdgeInsets.zero,
+                  title: const Text('Show error details',
+                      style: TextStyle(color: Colors.white24, fontSize: 12)),
+                  iconColor: Colors.white24,
+                  collapsedIconColor: Colors.white24,
+                  children: [
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.05),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Text(_error!,
+                          style: const TextStyle(
+                              color: Colors.white38,
+                              fontSize: 10,
+                              fontFamily: 'monospace')),
                     ),
                   ],
                 ),
@@ -250,10 +248,8 @@ class _AppBootstrapState extends State<AppBootstrap> {
             children: [
               CircularProgressIndicator(color: AppTheme.primary),
               SizedBox(height: 20),
-              Text(
-                'Starting Resonance...',
-                style: TextStyle(color: Colors.white38, fontSize: 14),
-              ),
+              Text('Starting Resonance...',
+                  style: TextStyle(color: Colors.white38, fontSize: 14)),
             ],
           ),
         ),
@@ -264,7 +260,7 @@ class _AppBootstrapState extends State<AppBootstrap> {
   }
 }
 
-// ── MainShell ───────────────────────────────────────────────────────────────
+// ── MainShell ─────────────────────────────────────────────────────────────────
 class MainShell extends StatefulWidget {
   const MainShell({super.key});
   @override

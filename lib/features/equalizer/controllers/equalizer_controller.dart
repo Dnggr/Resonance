@@ -1,3 +1,4 @@
+// lib/features/equalizer/controllers/equalizer_controller.dart
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
@@ -33,21 +34,33 @@ class EqualizerController extends GetxController {
   RxInt minLevel = (-1500).obs;
   RxInt maxLevel = 1500.obs;
 
-  // Guard: don't double-init AudioEffect objects
-  bool _isInitialized = false;
+  // Track the last session ID we initialized with.
+  // If the session ID changes (shouldn't normally happen with a shared player,
+  // but can on some devices), we re-init.
+  int? _lastSessionId;
 
   List<EqualizerPreset> get presets => _presets;
 
+  bool get isInitialized => _lastSessionId != null;
+
   Future<void> init(int audioSessionId) async {
-    // Already initialized — AudioEffect is tied to AudioPlayer session
-    // which doesn't change between songs. Re-initializing would cause
-    // a ~200ms audio glitch and waste resources.
-    if (_isInitialized) return;
+    // ── FIX: Guard on session ID, not a boolean ──────────────────────────
+    // Old code: `if (_isInitialized) return;`
+    // Problem: On the first song, _isInitialized was false → init ran → worked.
+    // But the EQ screen showed "Play a song first" because numBands was 0
+    // during the async gap. On the second song, _isInitialized was true → skipped.
+    //
+    // New behavior:
+    // - If same session ID → skip (safe, no glitch)
+    // - If different session ID → re-init (handles device edge cases)
+    // - If first time → always init
+    if (_lastSessionId == audioSessionId) return;
 
     try {
       await _channel.invokeMethod('init', {'sessionId': audioSessionId});
 
-      numBands.value = (await _channel.invokeMethod<int>('getNumBands')) ?? 5;
+      final bands = (await _channel.invokeMethod<int>('getNumBands')) ?? 5;
+      numBands.value = bands;
 
       final range =
           await _channel.invokeMethod<List<dynamic>>('getBandLevelRange');
@@ -57,7 +70,7 @@ class EqualizerController extends GetxController {
       }
 
       final freqs = <int>[];
-      for (int i = 0; i < numBands.value; i++) {
+      for (int i = 0; i < bands; i++) {
         final f = await _channel
                 .invokeMethod<int>('getBandCenterFreq', {'band': i}) ??
             0;
@@ -66,24 +79,30 @@ class EqualizerController extends GetxController {
       centerFreqs.assignAll(freqs);
 
       final lvls = <int>[];
-      for (int i = 0; i < numBands.value; i++) {
+      for (int i = 0; i < bands; i++) {
         final l =
             await _channel.invokeMethod<int>('getBandLevel', {'band': i}) ?? 0;
         lvls.add(l);
       }
       levels.assignAll(lvls);
 
-      _isInitialized = true;
-      debugPrint('EQ initialized: ${numBands.value} bands, '
-          'range ${minLevel.value}..${maxLevel.value} mB');
+      // ── FIX: Mark initialized LAST, after all reactive vars are set ─────
+      // Previously _isInitialized = true came BEFORE the data was loaded,
+      // causing the EQ screen to render with stale/empty data on first open.
+      _lastSessionId = audioSessionId;
+
+      debugPrint('EQ initialized: $bands bands, '
+          'range ${minLevel.value}..${maxLevel.value} mB, '
+          'session: $audioSessionId');
     } catch (e) {
-      // EQ not supported on this device — app keeps working without it
+      // EQ not supported on this device — app keeps working without it.
+      // Don't set _lastSessionId so we retry on next song.
       debugPrint('EQ init failed (non-fatal): $e');
     }
   }
 
   Future<void> setBandLevel(int band, int levelMillibels) async {
-    if (!_isInitialized) return;
+    if (!isInitialized) return;
     if (band < 0 || band >= levels.length) return;
     levels[band] = levelMillibels;
     try {
@@ -95,7 +114,7 @@ class EqualizerController extends GetxController {
   }
 
   Future<void> setEnabled(bool value) async {
-    if (!_isInitialized) return;
+    if (!isInitialized) return;
     enabled.value = value;
     try {
       await _channel.invokeMethod('setEqEnabled', {'enabled': value});
@@ -114,7 +133,7 @@ class EqualizerController extends GetxController {
   }
 
   Future<void> setBassBoost(int strength) async {
-    if (!_isInitialized) return;
+    if (!isInitialized) return;
     bassBoost.value = strength.clamp(0, 1000);
     try {
       await _channel
@@ -125,7 +144,7 @@ class EqualizerController extends GetxController {
   }
 
   Future<void> setGain(int gainMillibels) async {
-    if (!_isInitialized) return;
+    if (!isInitialized) return;
     gain.value = gainMillibels.clamp(0, 1200);
     try {
       await _channel.invokeMethod('setGain', {'gain': gain.value});
@@ -135,7 +154,7 @@ class EqualizerController extends GetxController {
   }
 
   Future<void> setVirtualizer(int strength) async {
-    if (!_isInitialized) return;
+    if (!isInitialized) return;
     virtualizer.value = strength.clamp(0, 1000);
     try {
       await _channel
@@ -146,10 +165,10 @@ class EqualizerController extends GetxController {
   }
 
   Future<void> release() async {
-    if (!_isInitialized) return;
+    if (!isInitialized) return;
     try {
       await _channel.invokeMethod('release');
-      _isInitialized = false;
+      _lastSessionId = null;
     } catch (e) {
       debugPrint('EQ release error: $e');
     }

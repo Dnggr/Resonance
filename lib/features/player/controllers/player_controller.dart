@@ -1,4 +1,5 @@
 // lib/features/player/controllers/player_controller.dart
+import 'dart:async';
 import 'dart:io';
 import 'package:audio_service/audio_service.dart';
 import 'package:flutter/foundation.dart';
@@ -29,12 +30,10 @@ class PlayerController extends GetxController {
   final AudioPlayer player;
   final ResonanceAudioHandler? _handler;
 
-  // Default constructor — no audio_service (kept for safety/fallback)
   PlayerController()
       : player = AudioPlayer(),
         _handler = null;
 
-  // Named constructor — with audio_service shared player + handler
   PlayerController.withHandler(
     AudioPlayer sharedPlayer,
     ResonanceAudioHandler handler,
@@ -62,10 +61,15 @@ class PlayerController extends GetxController {
 
   DateTime _lastPositionUpdate = DateTime.now();
 
+  // ── FIX: Track the EQ init subscription so we can cancel on song change ──
+  // Old approach used Future.microtask which fired before the audio engine
+  // was ready → androidAudioSessionId returned null → EQ not init'd on song 1.
+  // New approach: subscribe to processingStateStream and wait for 'ready'.
+  StreamSubscription<ProcessingState>? _eqInitSub;
+
   @override
   void onInit() {
     super.onInit();
-    // Throttle position updates to 4/sec — prevents excessive Obx rebuilds
     player.positionStream.listen((p) {
       final now = DateTime.now();
       if (now.difference(_lastPositionUpdate).inMilliseconds >= 250) {
@@ -81,7 +85,7 @@ class PlayerController extends GetxController {
     loadSongs();
   }
 
-  // ── Library filter ─────────────────────────────────────────────────────────
+  // ── Library filter ──────────────────────────────────────────────────────
 
   void filterSongs(String query) {
     searchQuery.value = query;
@@ -104,7 +108,7 @@ class PlayerController extends GetxController {
         .toList();
   }
 
-  // ── Song scanning ──────────────────────────────────────────────────────────
+  // ── Song scanning ───────────────────────────────────────────────────────
 
   Future<void> loadSongs() async {
     isLoading.value = true;
@@ -127,7 +131,7 @@ class PlayerController extends GetxController {
     }
   }
 
-  // ── Playback entry points ──────────────────────────────────────────────────
+  // ── Playback entry points ───────────────────────────────────────────────
 
   Future<void> playSong(int indexInFiltered) async {
     if (indexInFiltered < 0 || indexInFiltered >= filteredSongs.length) return;
@@ -139,15 +143,9 @@ class PlayerController extends GetxController {
     await _playCurrentQueueItem();
   }
 
-  // ── FIX: Playlist playback bug ──────────────────────────────────────────
-  // Previously called as: playFromPlaylist(allSongs, i, pl.name)
-  // where `i` was the playlist's index in the outer ListView, not a song index.
-  // The startIndex here is the song index WITHIN the playlist songs list.
-  // When tapping a playlist to start it, callers should pass 0 (first song).
   Future<void> playFromPlaylist(
       List<SongFile> playlistSongs, int startIndex, String playlistName) async {
     if (playlistSongs.isEmpty) return;
-    // Clamp to valid range — defensive guard
     final safeStart = startIndex.clamp(0, playlistSongs.length - 1);
     queue.assignAll(playlistSongs);
     queueSource.value = playlistName;
@@ -206,58 +204,68 @@ class PlayerController extends GetxController {
     }
   }
 
-  // ── Core playback ──────────────────────────────────────────────────────────
+  // ── Core playback ───────────────────────────────────────────────────────
 
   Future<void> _playCurrentQueueItem() async {
     if (queueIndex.value < 0 || queueIndex.value >= queue.length) return;
     final song = queue[queueIndex.value];
+
+    // Cancel any in-flight EQ init subscription from the previous song
+    await _eqInitSub?.cancel();
+    _eqInitSub = null;
+
     try {
       if (_handler != null) {
-        // With audio_service: updates lock screen + notification
         final item = MediaItem(
           id: song.path,
           title: song.name,
           album: song.ext.toUpperCase(),
-          // artUri can be added here if you have album art extraction
         );
         await _handler!.playFile(song.path, item);
       } else {
-        // Without audio_service: direct just_audio
         await player.setFilePath(song.path);
         await player.play();
       }
 
-      // ── FIX: EQ initialization ─────────────────────────────────────────
-      // Removed the _eqInitialized guard from PlayerController.
-      // The guard now lives ONLY in EqualizerController._isInitialized.
-      // This ensures EQ init is attempted after every song change,
-      // which fixes the issue where EQ didn't work on some songs because
-      // the session was ready on some formats but not others at init time.
-      // EqualizerController._isInitialized prevents expensive double-init.
-      _initEqualizer();
+      // Schedule EQ init — wait until audio engine signals it's ready
+      _scheduleEqInit();
     } catch (e) {
       error.value = 'Cannot play: ${song.name}';
       debugPrint('Playback error: $e');
     }
   }
 
-  // ── FIX: Removed async/await — fire-and-forget is correct here ────────────
-  // EQ init must NOT block playback. Using unawaited future pattern.
-  void _initEqualizer() {
-    Future.microtask(() async {
-      try {
-        // androidAudioSessionId is only available after setFilePath() succeeds
-        // and only on Android. Returns null on iOS/desktop — handled safely.
-        final sessionId = await player.androidAudioSessionId;
-        if (sessionId == null) return;
-        if (!Get.isRegistered<EqualizerController>()) return;
-        final eq = Get.find<EqualizerController>();
-        await eq.init(sessionId);
-      } catch (e) {
-        // EQ not supported on this device — player keeps working fine
-        debugPrint('EQ init skipped (non-fatal): $e');
-      }
+  /// Subscribe to processingStateStream and init EQ exactly once,
+  /// when the state first reaches ProcessingState.ready.
+  ///
+  /// WHY: androidAudioSessionId is only non-null once the audio engine
+  /// has fully loaded the file (ready state). Calling it earlier returns
+  /// null, meaning EQ attaches to session 0 (system audio) — not our player.
+  void _scheduleEqInit() {
+    _eqInitSub = player.processingStateStream
+        .where((s) => s == ProcessingState.ready)
+        .take(1)
+        .listen((_) async {
+      await _initEqualizer();
+      await _eqInitSub?.cancel();
+      _eqInitSub = null;
     });
+  }
+
+  Future<void> _initEqualizer() async {
+    try {
+      final sessionId = await player.androidAudioSessionId;
+      if (sessionId == null) {
+        debugPrint(
+            'EQ: session ID null at ready state — device may not support it');
+        return;
+      }
+      if (!Get.isRegistered<EqualizerController>()) return;
+      final eq = Get.find<EqualizerController>();
+      await eq.init(sessionId);
+    } catch (e) {
+      debugPrint('EQ init error (non-fatal): $e');
+    }
   }
 
   void _onTrackComplete() {
@@ -397,16 +405,13 @@ class PlayerController extends GetxController {
 
   @override
   void onClose() {
-    // Only dispose player if WE created it (default constructor).
-    // withHandler constructor uses _sharedPlayer which is module-level
-    // and must not be disposed here.
+    _eqInitSub?.cancel();
     if (_handler == null) player.dispose();
     super.onClose();
   }
 }
 
-// ── Isolate function — runs on a background thread ────────────────────────────
-// Must be a top-level function (not a method) for compute() to work.
+// ── Isolate function — must be top-level for compute() ──────────────────────
 List<List<String>> _scanDirsIsolate(List<String> dirPaths) {
   final results = <List<String>>[];
   const supportedExts = {'.mp3', '.flac', '.m4a', '.aac', '.ogg', '.wav'};

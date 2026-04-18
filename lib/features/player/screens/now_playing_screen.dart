@@ -36,17 +36,13 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
-        // ── FIX: Only ONE leading icon (back button auto-added by Flutter) ──
-        // Previously there were TWO equalizer buttons: one in leading, one in actions.
-        // Now: leading = back button (auto), actions = EQ + playlist add.
+        // Single EQ button in actions (leading = back button auto-provided)
         actions: [
-          // ── Equalizer button (single, in actions) ──────────────────────
           IconButton(
             icon: const Icon(Icons.equalizer_rounded, color: Colors.white54),
             tooltip: 'Equalizer & Amplifier',
             onPressed: () => Get.to(() => const EqualizerScreen()),
           ),
-          // ── Add to playlist ────────────────────────────────────────────
           Obx(() => ctrl.currentSong != null
               ? IconButton(
                   icon: const Icon(Icons.playlist_add_rounded,
@@ -57,7 +53,6 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
                 )
               : const SizedBox.shrink()),
         ],
-        // ── Tab bar as title ───────────────────────────────────────────────
         title: TabBar(
           controller: _tabCtrl,
           tabs: const [
@@ -139,7 +134,10 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
   }
 }
 
-// ─── Player Tab ───────────────────────────────────────────────
+// ─── Player Tab ─────────────────────────────────────────────────────────────
+// Layout: album art fills upper portion, song info + seekbar + controls
+// are pinned to the BOTTOM using a Column with MainAxisAlignment.end.
+// This matches the standard music player UX (Spotify, YouTube Music, etc.).
 class _PlayerTab extends StatelessWidget {
   final PlayerController ctrl;
   final Function(String) onAddToPlaylist;
@@ -154,58 +152,71 @@ class _PlayerTab extends StatelessWidget {
                 style: TextStyle(color: Colors.white38)));
       }
 
-      // ── FIX: Use LayoutBuilder for a fully responsive player UI ─────────
-      // Previously the player used hardcoded sizes (220x220 album art, etc.)
-      // which caused overflow on small screens and wasted space on large ones.
-      // LayoutBuilder adapts every element to the available height.
-      return LayoutBuilder(
-        builder: (context, constraints) {
-          final availH = constraints.maxHeight;
-          // Determine album art size: take up ~35% of available height,
-          // capped at 260 and minimum 140.
-          final artSize = (availH * 0.35).clamp(140.0, 260.0);
-          // Vertical padding scales with available space
-          final vPad = (availH * 0.03).clamp(8.0, 24.0);
-
-          return SingleChildScrollView(
-            physics: const ClampingScrollPhysics(),
+      // ── Layout: use Column that fills the screen ─────────────────────────
+      // The album art is in an Expanded widget (takes all leftover space).
+      // Song info, seekbar, and controls are fixed-height at the bottom.
+      // No SingleChildScrollView — nothing should scroll on the player screen.
+      return Column(
+        children: [
+          // ── Album art — fills all remaining space above the controls ────
+          Expanded(
             child: Padding(
-              padding: EdgeInsets.symmetric(vertical: vPad),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _AlbumArt(size: artSize),
-                  SizedBox(height: vPad),
-                  _SongInfo(ctrl: ctrl),
-                  SizedBox(height: vPad * 0.8),
-                  _SeekBar(ctrl: ctrl),
-                  SizedBox(height: vPad * 0.6),
-                  _Controls(ctrl: ctrl),
-                  SizedBox(height: vPad),
-                ],
-              ),
+              padding: const EdgeInsets.fromLTRB(40, 16, 40, 8),
+              child: _AlbumArt(),
             ),
-          );
-        },
+          ),
+
+          // ── Song title + format/source label ───────────────────────────
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 32),
+            child: Column(children: [
+              Obx(() => Text(
+                    ctrl.currentSong?.name ?? '',
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold),
+                    textAlign: TextAlign.center,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  )),
+              const SizedBox(height: 4),
+              Obx(() => Text(
+                    '${ctrl.currentSong?.ext.toUpperCase() ?? ''} · ${ctrl.queueSource.value}',
+                    style: const TextStyle(color: Colors.white38, fontSize: 13),
+                  )),
+            ]),
+          ),
+
+          const SizedBox(height: 20),
+
+          // ── Seek bar + timestamps ───────────────────────────────────────
+          _SeekBar(ctrl: ctrl),
+
+          const SizedBox(height: 8),
+
+          // ── Playback controls (shuffle, prev, play/pause, next, repeat) ─
+          _Controls(ctrl: ctrl),
+
+          // ── Bottom safe area padding ────────────────────────────────────
+          const SizedBox(height: 24),
+        ],
       );
     });
   }
 }
 
-// ─── Album Art — size is now passed in ────────────────────────────────────
+// ─── Album Art ──────────────────────────────────────────────────────────────
+// No hardcoded size — fills whatever space Expanded gives it.
 class _AlbumArt extends StatelessWidget {
-  final double size;
-  const _AlbumArt({required this.size});
+  const _AlbumArt();
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      width: size,
-      height: size,
-      margin: const EdgeInsets.symmetric(horizontal: 40),
       decoration: BoxDecoration(
         color: AppTheme.surface,
-        borderRadius: BorderRadius.circular(20),
+        borderRadius: BorderRadius.circular(24),
         border: Border.all(color: AppTheme.primary.withOpacity(0.3)),
         boxShadow: [
           BoxShadow(
@@ -222,35 +233,9 @@ class _AlbumArt extends StatelessWidget {
   }
 }
 
-class _SongInfo extends StatelessWidget {
-  final PlayerController ctrl;
-  const _SongInfo({required this.ctrl});
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 32),
-      child: Column(children: [
-        Obx(() => Text(
-              ctrl.currentSong?.name ?? '',
-              style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 20,
-                  fontWeight: FontWeight.bold),
-              textAlign: TextAlign.center,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-            )),
-        const SizedBox(height: 4),
-        Obx(() => Text(
-              '${ctrl.currentSong?.ext.toUpperCase() ?? ''} · ${ctrl.queueSource.value}',
-              style: const TextStyle(color: Colors.white38, fontSize: 13),
-            )),
-      ]),
-    );
-  }
-}
-
-// ─── SeekBar — StatefulWidget so only it rebuilds on position tick ──────────
+// ─── SeekBar ────────────────────────────────────────────────────────────────
+// StatefulWidget: only this widget rebuilds on every position tick (not the
+// whole player), keeping frame rate high.
 class _SeekBar extends StatefulWidget {
   final PlayerController ctrl;
   const _SeekBar({required this.ctrl});
@@ -317,39 +302,45 @@ class _SeekBarState extends State<_SeekBar> {
   }
 }
 
+// ─── Controls ───────────────────────────────────────────────────────────────
 class _Controls extends StatelessWidget {
   final PlayerController ctrl;
   const _Controls({required this.ctrl});
+
   @override
   Widget build(BuildContext context) {
     return Obx(() => Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 24),
+          padding: const EdgeInsets.symmetric(horizontal: 16),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
             children: [
+              // Shuffle
               IconButton(
                 icon: Icon(Icons.shuffle_rounded,
                     color: ctrl.shuffleEnabled.value
                         ? AppTheme.primary
                         : Colors.white38,
-                    size: 22),
+                    size: 24),
                 onPressed: ctrl.toggleShuffle,
               ),
+              // Previous
               IconButton(
                 icon: const Icon(Icons.skip_previous_rounded,
-                    color: Colors.white, size: 32),
+                    color: Colors.white, size: 36),
                 onPressed: ctrl.playPrev,
               ),
+              // Play / Pause — large center button
               Container(
-                width: 64,
-                height: 64,
+                width: 68,
+                height: 68,
                 decoration: BoxDecoration(
                     color: AppTheme.primary,
                     shape: BoxShape.circle,
                     boxShadow: [
                       BoxShadow(
                           color: AppTheme.primary.withOpacity(0.4),
-                          blurRadius: 20)
+                          blurRadius: 20,
+                          spreadRadius: 2)
                     ]),
                 child: IconButton(
                   icon: Icon(
@@ -357,15 +348,18 @@ class _Controls extends StatelessWidget {
                           ? Icons.pause_rounded
                           : Icons.play_arrow_rounded,
                       color: Colors.white,
-                      size: 32),
+                      size: 36),
                   onPressed: ctrl.togglePlay,
+                  padding: EdgeInsets.zero,
                 ),
               ),
+              // Next
               IconButton(
                 icon: const Icon(Icons.skip_next_rounded,
-                    color: Colors.white, size: 32),
+                    color: Colors.white, size: 36),
                 onPressed: ctrl.playNext,
               ),
+              // Repeat
               IconButton(
                 icon: Icon(
                     ctrl.loopMode.value == LoopMode.one
@@ -374,7 +368,7 @@ class _Controls extends StatelessWidget {
                     color: ctrl.loopMode.value != LoopMode.none
                         ? AppTheme.primary
                         : Colors.white38,
-                    size: 22),
+                    size: 24),
                 onPressed: ctrl.cycleLoopMode,
               ),
             ],
@@ -383,7 +377,7 @@ class _Controls extends StatelessWidget {
   }
 }
 
-// ─── Queue Tab — reorderable ──────────────────────────────────────────────
+// ─── Queue Tab ───────────────────────────────────────────────────────────────
 class _QueueTab extends StatelessWidget {
   final PlayerController ctrl;
   const _QueueTab({required this.ctrl});
