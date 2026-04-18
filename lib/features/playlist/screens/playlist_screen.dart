@@ -1,3 +1,4 @@
+// lib/features/playlist/screens/playlist_screen.dart
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import '../../../core/theme/app_theme.dart';
@@ -64,7 +65,7 @@ class PlaylistScreen extends StatelessWidget {
               decoration: BoxDecoration(
                 color: AppTheme.surface,
                 borderRadius: BorderRadius.circular(14),
-                border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+                border: Border.all(color: Colors.white.withOpacity(0.08)),
               ),
               child: ListTile(
                 contentPadding:
@@ -88,16 +89,32 @@ class PlaylistScreen extends StatelessWidget {
                     style:
                         const TextStyle(color: Colors.white38, fontSize: 12)),
                 onTap: () async {
+                  if (pl.songPaths.isEmpty) {
+                    Get.snackbar(
+                      'Empty playlist',
+                      'Add songs to "${pl.name}" first',
+                      backgroundColor: AppTheme.surface,
+                      colorText: Colors.white,
+                      snackPosition: SnackPosition.BOTTOM,
+                    );
+                    return;
+                  }
+
                   final allSongs = pl.songPaths.map((path) {
                     final name = path.split('/').last.replaceAll(
-                        RegExp(r'\.(mp3|flac|m4a|aac|wav)$',
+                        RegExp(r'\.(mp3|flac|m4a|aac|wav|ogg)$',
                             caseSensitive: false),
                         '');
                     final ext = path.split('.').last.toLowerCase();
                     return SongFile(path: path, name: name, ext: ext);
                   }).toList();
 
-                  await playerCtrl.playFromPlaylist(allSongs, i, pl.name);
+                  // ── FIX: Pass 0 as startIndex, not `i` ──────────────────
+                  // `i` was the playlist's index in the ListView, NOT a song index.
+                  // We always start playlist playback from the first song (index 0).
+                  // Users can tap individual songs in PlaylistDetailScreen
+                  // to start from a specific song.
+                  await playerCtrl.playFromPlaylist(allSongs, 0, pl.name);
                   Get.to(() => const NowPlayingScreen(),
                       transition: Transition.downToUp);
                 },
@@ -108,11 +125,19 @@ class PlaylistScreen extends StatelessWidget {
                   icon: const Icon(Icons.more_vert_rounded,
                       color: Colors.white38),
                   onSelected: (val) {
-                    if (val == 'rename')
+                    if (val == 'rename') {
                       _showRenameDialog(context, plCtrl, pl.id, pl.name);
+                    }
+                    if (val == 'view') {
+                      Get.to(() => PlaylistDetailScreen(playlistId: pl.id));
+                    }
                     if (val == 'delete') plCtrl.deletePlaylist(pl.id);
                   },
                   itemBuilder: (_) => [
+                    const PopupMenuItem(
+                        value: 'view',
+                        child: Text('View songs',
+                            style: TextStyle(color: Colors.white))),
                     const PopupMenuItem(
                         value: 'rename',
                         child: Text('Rename',
@@ -250,9 +275,11 @@ class PlaylistDetailScreen extends StatelessWidget {
                 itemBuilder: (_, i) {
                   final path = pl.songPaths[i];
                   final name = path.split('/').last.replaceAll(
-                      RegExp(r'\.(mp3|flac|m4a|aac|wav)$',
+                      RegExp(r'\.(mp3|flac|m4a|aac|wav|ogg)$',
                           caseSensitive: false),
                       '');
+                  final ext = path.split('.').last.toLowerCase();
+
                   return ListTile(
                     contentPadding:
                         const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
@@ -263,8 +290,22 @@ class PlaylistDetailScreen extends StatelessWidget {
                             const TextStyle(color: Colors.white, fontSize: 14),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis),
+                    subtitle: Text(ext.toUpperCase(),
+                        style: const TextStyle(
+                            color: Colors.white30, fontSize: 11)),
                     onTap: () async {
-                      await playerCtrl.playSongByPath(path);
+                      // ── FIX: Play from the tapped song's position ──────
+                      // Build the full playlist and start from song index `i`
+                      final allSongs = pl.songPaths.map((p) {
+                        final n = p.split('/').last.replaceAll(
+                            RegExp(r'\.(mp3|flac|m4a|aac|wav|ogg)$',
+                                caseSensitive: false),
+                            '');
+                        final e = p.split('.').last.toLowerCase();
+                        return SongFile(path: p, name: n, ext: e);
+                      }).toList();
+
+                      await playerCtrl.playFromPlaylist(allSongs, i, pl.name);
                       Get.to(() => const NowPlayingScreen(),
                           transition: Transition.downToUp);
                     },

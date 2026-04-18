@@ -17,12 +17,27 @@ class ResonanceAudioHandler extends BaseAudioHandler
   }
 
   void _init() {
+    // ── FIX: Listen to playback events and broadcast them ─────────────────
+    // This is what drives the lock-screen / notification controls.
     player.playbackEventStream.listen(
       _broadcastState,
       onError: (Object e, StackTrace st) {
         debugPrint('AudioHandler stream error: $e');
       },
     );
+
+    // ── FIX: Also listen to playing state changes separately ──────────────
+    // playbackEventStream doesn't always fire on play/pause toggles alone.
+    player.playingStream.listen((_) {
+      _broadcastState(
+        PlaybackEvent(
+          processingState: player.processingState,
+          updatePosition: player.position,
+          bufferedPosition: player.bufferedPosition,
+        ),
+      );
+    });
+
     player.processingStateStream.listen((state) {
       if (state == ProcessingState.completed) skipToNext();
     });
@@ -31,9 +46,6 @@ class ResonanceAudioHandler extends BaseAudioHandler
   void _broadcastState(PlaybackEvent event) {
     final playing = player.playing;
 
-    // TRAP FIX: use player.processingState as the map key.
-    // Previous version hardcoded ProcessingState.idle which made the
-    // notification always show "loading" state regardless of actual state.
     final processingState = {
           ProcessingState.idle: AudioProcessingState.idle,
           ProcessingState.loading: AudioProcessingState.loading,
@@ -51,6 +63,8 @@ class ResonanceAudioHandler extends BaseAudioHandler
       ],
       systemActions: const {
         MediaAction.seek,
+        MediaAction.seekForward,
+        MediaAction.seekBackward,
         MediaAction.skipToNext,
         MediaAction.skipToPrevious,
       },
@@ -97,8 +111,6 @@ class ResonanceAudioHandler extends BaseAudioHandler
 
   @override
   Future<void> skipToNext() async {
-    // Typed find — crashes loudly if PlayerController not registered
-    // instead of silently doing nothing
     try {
       Get.find<PlayerController>().playNext();
     } catch (e) {
@@ -115,9 +127,15 @@ class ResonanceAudioHandler extends BaseAudioHandler
     }
   }
 
-  /// Load a file and update the lock screen / notification metadata
+  /// Load a file and update the lock screen / notification metadata.
+  /// This is the primary entry point for playing a song WITH notification support.
   Future<void> playFile(String path, MediaItem item) async {
+    // ── FIX: Update mediaItem BEFORE setting the file path ────────────────
+    // audio_service needs this to display song info on the lock screen.
+    // Setting it after setFilePath() causes a race where the notification
+    // shows blank or stale info on the first play.
     mediaItem.add(item);
+
     await player.setFilePath(path);
     await player.play();
   }

@@ -2,6 +2,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:audio_service/audio_service.dart';
+import 'package:audio_session/audio_session.dart';
 import 'package:get/get.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:just_audio/just_audio.dart';
@@ -43,17 +44,9 @@ void main() async {
   await Hive.openBox<DownloadRecord>('downloads');
 
   // Register everything that does NOT need audio_service.
-  // These are safe to init before runApp().
-  // TRAP: Use isRegistered guard — hot restart can call main() again
-  // without clearing GetX, which would throw "already registered".
   if (!Get.isRegistered<DownloaderService>()) Get.put(DownloaderService());
   if (!Get.isRegistered<PlaylistController>()) Get.put(PlaylistController());
   if (!Get.isRegistered<EqualizerController>()) Get.put(EqualizerController());
-
-  // TRAP: Do NOT register PlayerController here.
-  // It needs the shared AudioPlayer + handler from audio_service.
-  // Registering it here with a plain AudioPlayer would create a SECOND
-  // AudioPlayer, and then withHandler() would fail with "already registered".
 
   runApp(const ResonanceApp());
 }
@@ -72,10 +65,6 @@ class ResonanceApp extends StatelessWidget {
 }
 
 // ── AppBootstrap ────────────────────────────────────────────────────────────
-// Initializes audio_service AFTER the UI starts rendering.
-// Shows a spinner instead of freezing on the Flutter logo.
-// TRAP: Never call AudioService.init() in main() — it can hang
-// the splash screen for 5–12 seconds on first install.
 class AppBootstrap extends StatefulWidget {
   const AppBootstrap({super.key});
   @override
@@ -93,14 +82,10 @@ class _AppBootstrapState extends State<AppBootstrap> {
   }
 
   Future<void> _boot() async {
+    // Clear error state when retrying
     if (mounted) setState(() => _error = null);
 
     try {
-      // ── TRAP: Singleton guard ──────────────────────────────────────────
-      // AudioService is a process-level singleton (not just app-level).
-      // Calling init() a second time (e.g. on hot restart) throws:
-      // "Failed assertion: '_cacheManager == null': is not true"
-      // The bool flag prevents this.
       if (!_audioServiceInitialized) {
         _audioHandler = await AudioService.init(
           builder: () => ResonanceAudioHandler(_sharedPlayer),
@@ -124,6 +109,12 @@ class _AppBootstrapState extends State<AppBootstrap> {
           ),
         );
         _audioServiceInitialized = true;
+
+        // ── FIX: Configure audio session for proper media notification ──────
+        // Without this, Android won't show the media notification correctly
+        // on lock screen and the system doesn't know we're a music player.
+        final session = await AudioSession.instance;
+        await session.configure(const AudioSessionConfiguration.music());
       }
 
       // Register PlayerController only after handler is confirmed ready
@@ -137,29 +128,35 @@ class _AppBootstrapState extends State<AppBootstrap> {
 
       // ── TRAP: _cacheManager assertion = service already running ────────
       // This happens on hot restart. The service is actually fine.
-      // Mark as initialized and proceed normally.
       if (e.toString().contains('_cacheManager')) {
         _audioServiceInitialized = true;
         if (!Get.isRegistered<PlayerController>() && _audioHandler != null) {
           Get.put(PlayerController.withHandler(_sharedPlayer, _audioHandler!));
         } else if (!Get.isRegistered<PlayerController>()) {
-          // Handler ref lost on hot restart — fall back to no-service mode
           Get.put(PlayerController());
         }
         if (mounted) setState(() => _ready = true);
         return;
       }
 
-      // ── TRAP: IllegalStateException = wrong Activity class ─────────────
-      // audio_service failed entirely. Register a fallback PlayerController
-      // WITHOUT audio_service so the library and search screens still work.
-      // The user loses lock-screen controls but the app doesn't crash.
+      // Audio service failed — register fallback controller so app still works.
+      // User loses lock-screen controls but playback still functions.
       if (!Get.isRegistered<PlayerController>()) {
-        Get.put(PlayerController()); // fallback: no background service
+        Get.put(PlayerController());
       }
 
       if (mounted) setState(() => _error = e.toString());
     }
+  }
+
+  // ── FIX: Continue button now correctly transitions to ready state ──────────
+  // Previously the error was still shown because _error wasn't cleared.
+  void _continueWithoutService() {
+    if (mounted)
+      setState(() {
+        _error = null;
+        _ready = true;
+      });
   }
 
   @override
@@ -214,6 +211,9 @@ class _AppBootstrapState extends State<AppBootstrap> {
                   mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                   children: [
                     ElevatedButton.icon(
+                      // FIX: _boot() now clears _error before retrying,
+                      // so Retry no longer immediately jumps to MainShell.
+                      // It shows the loading spinner while re-attempting init.
                       onPressed: _boot,
                       icon: const Icon(Icons.refresh_rounded, size: 18),
                       label: const Text('Retry'),
@@ -221,11 +221,9 @@ class _AppBootstrapState extends State<AppBootstrap> {
                           backgroundColor: AppTheme.primary,
                           foregroundColor: Colors.white),
                     ),
-                    // Continue without lock screen controls
+                    // FIX: Continue now correctly sets _error = null + _ready = true
                     OutlinedButton.icon(
-                      onPressed: () {
-                        if (mounted) setState(() => _ready = true);
-                      },
+                      onPressed: _continueWithoutService,
                       icon: const Icon(Icons.music_note_rounded,
                           size: 18, color: Colors.white54),
                       label: const Text('Continue anyway',

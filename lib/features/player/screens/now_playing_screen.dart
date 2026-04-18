@@ -1,3 +1,4 @@
+// lib/features/player/screens/now_playing_screen.dart
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import '../../../core/theme/app_theme.dart';
@@ -34,10 +35,29 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
       backgroundColor: AppTheme.background,
       appBar: AppBar(
         backgroundColor: Colors.transparent,
-        leading: IconButton(
-          icon: const Icon(Icons.equalizer_rounded, color: Colors.white54),
-          onPressed: () => Get.to(() => const EqualizerScreen()),
-        ),
+        elevation: 0,
+        // ── FIX: Only ONE leading icon (back button auto-added by Flutter) ──
+        // Previously there were TWO equalizer buttons: one in leading, one in actions.
+        // Now: leading = back button (auto), actions = EQ + playlist add.
+        actions: [
+          // ── Equalizer button (single, in actions) ──────────────────────
+          IconButton(
+            icon: const Icon(Icons.equalizer_rounded, color: Colors.white54),
+            tooltip: 'Equalizer & Amplifier',
+            onPressed: () => Get.to(() => const EqualizerScreen()),
+          ),
+          // ── Add to playlist ────────────────────────────────────────────
+          Obx(() => ctrl.currentSong != null
+              ? IconButton(
+                  icon: const Icon(Icons.playlist_add_rounded,
+                      color: Colors.white54),
+                  tooltip: 'Add to playlist',
+                  onPressed: () =>
+                      _showAddToPlaylist(context, ctrl.currentSong!.path),
+                )
+              : const SizedBox.shrink()),
+        ],
+        // ── Tab bar as title ───────────────────────────────────────────────
         title: TabBar(
           controller: _tabCtrl,
           tabs: const [
@@ -50,22 +70,6 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
           indicatorSize: TabBarIndicatorSize.label,
           dividerColor: Colors.transparent,
         ),
-        actions: [
-          // EQ button — navigates to EqualizerScreen
-          IconButton(
-            icon: const Icon(Icons.equalizer_rounded, color: Colors.white54),
-            tooltip: 'Equalizer',
-            onPressed: () => Get.to(() => const EqualizerScreen()),
-          ),
-          Obx(() => ctrl.currentSong != null
-              ? IconButton(
-                  icon: const Icon(Icons.playlist_add_rounded,
-                      color: Colors.white54),
-                  onPressed: () =>
-                      _showAddToPlaylist(context, ctrl.currentSong!.path),
-                )
-              : const SizedBox.shrink()),
-        ],
       ),
       body: TabBarView(
         controller: _tabCtrl,
@@ -149,38 +153,63 @@ class _PlayerTab extends StatelessWidget {
             child: Text('Nothing playing',
                 style: TextStyle(color: Colors.white38)));
       }
-      return SingleChildScrollView(
-        child: Column(children: [
-          const SizedBox(height: 20),
-          const _AlbumArt(),
-          const SizedBox(height: 28),
-          _SongInfo(ctrl: ctrl),
-          const SizedBox(height: 20),
-          _SeekBar(ctrl: ctrl),
-          const SizedBox(height: 12),
-          _Controls(ctrl: ctrl),
-          const SizedBox(height: 20),
-        ]),
+
+      // ── FIX: Use LayoutBuilder for a fully responsive player UI ─────────
+      // Previously the player used hardcoded sizes (220x220 album art, etc.)
+      // which caused overflow on small screens and wasted space on large ones.
+      // LayoutBuilder adapts every element to the available height.
+      return LayoutBuilder(
+        builder: (context, constraints) {
+          final availH = constraints.maxHeight;
+          // Determine album art size: take up ~35% of available height,
+          // capped at 260 and minimum 140.
+          final artSize = (availH * 0.35).clamp(140.0, 260.0);
+          // Vertical padding scales with available space
+          final vPad = (availH * 0.03).clamp(8.0, 24.0);
+
+          return SingleChildScrollView(
+            physics: const ClampingScrollPhysics(),
+            child: Padding(
+              padding: EdgeInsets.symmetric(vertical: vPad),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _AlbumArt(size: artSize),
+                  SizedBox(height: vPad),
+                  _SongInfo(ctrl: ctrl),
+                  SizedBox(height: vPad * 0.8),
+                  _SeekBar(ctrl: ctrl),
+                  SizedBox(height: vPad * 0.6),
+                  _Controls(ctrl: ctrl),
+                  SizedBox(height: vPad),
+                ],
+              ),
+            ),
+          );
+        },
       );
     });
   }
 }
 
+// ─── Album Art — size is now passed in ────────────────────────────────────
 class _AlbumArt extends StatelessWidget {
-  const _AlbumArt();
+  final double size;
+  const _AlbumArt({required this.size});
+
   @override
   Widget build(BuildContext context) {
     return Container(
-      width: 220,
-      height: 220,
+      width: size,
+      height: size,
       margin: const EdgeInsets.symmetric(horizontal: 40),
       decoration: BoxDecoration(
         color: AppTheme.surface,
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: AppTheme.primary..withValues(alpha: 0.3)),
+        border: Border.all(color: AppTheme.primary.withOpacity(0.3)),
         boxShadow: [
           BoxShadow(
-              color: AppTheme.primary..withValues(alpha: 0.2),
+              color: AppTheme.primary.withOpacity(0.2),
               blurRadius: 40,
               offset: const Offset(0, 8))
         ],
@@ -221,7 +250,7 @@ class _SongInfo extends StatelessWidget {
   }
 }
 
-// ─── SeekBar — StatefulWidget so only it rebuilds on position tick ───
+// ─── SeekBar — StatefulWidget so only it rebuilds on position tick ──────────
 class _SeekBar extends StatefulWidget {
   final PlayerController ctrl;
   const _SeekBar({required this.ctrl});
@@ -354,7 +383,7 @@ class _Controls extends StatelessWidget {
   }
 }
 
-// ─── Queue Tab — reorderable ──────────────────────────────────
+// ─── Queue Tab — reorderable ──────────────────────────────────────────────
 class _QueueTab extends StatelessWidget {
   final PlayerController ctrl;
   const _QueueTab({required this.ctrl});
@@ -402,7 +431,7 @@ class _QueueTab extends StatelessWidget {
                   decoration: BoxDecoration(
                     color: isCurrent
                         ? AppTheme.primary.withOpacity(0.2)
-                        : Colors.white.withValues(alpha: 0.06),
+                        : Colors.white.withOpacity(0.06),
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: isCurrent && ctrl.isPlaying.value

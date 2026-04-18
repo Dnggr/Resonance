@@ -29,7 +29,7 @@ class PlayerController extends GetxController {
   final AudioPlayer player;
   final ResonanceAudioHandler? _handler;
 
-  // Default constructor — no audio_service (kept for safety)
+  // Default constructor — no audio_service (kept for safety/fallback)
   PlayerController()
       : player = AudioPlayer(),
         _handler = null;
@@ -59,11 +59,6 @@ class PlayerController extends GetxController {
 
   final List<int> _shuffleHistory = [];
   int _shuffleHistoryIndex = -1;
-
-  // EQ init guard — audio session ID doesn't change between songs
-  // on the same AudioPlayer instance, so we only need to init once.
-  // Re-initing causes a ~200ms audio glitch.
-  bool _eqInitialized = false;
 
   DateTime _lastPositionUpdate = DateTime.now();
 
@@ -144,13 +139,20 @@ class PlayerController extends GetxController {
     await _playCurrentQueueItem();
   }
 
+  // ── FIX: Playlist playback bug ──────────────────────────────────────────
+  // Previously called as: playFromPlaylist(allSongs, i, pl.name)
+  // where `i` was the playlist's index in the outer ListView, not a song index.
+  // The startIndex here is the song index WITHIN the playlist songs list.
+  // When tapping a playlist to start it, callers should pass 0 (first song).
   Future<void> playFromPlaylist(
       List<SongFile> playlistSongs, int startIndex, String playlistName) async {
-    if (startIndex < 0 || startIndex >= playlistSongs.length) return;
+    if (playlistSongs.isEmpty) return;
+    // Clamp to valid range — defensive guard
+    final safeStart = startIndex.clamp(0, playlistSongs.length - 1);
     queue.assignAll(playlistSongs);
     queueSource.value = playlistName;
-    queueIndex.value = startIndex;
-    _resetShuffleHistory(startIndex);
+    queueIndex.value = safeStart;
+    _resetShuffleHistory(safeStart);
     await _playCurrentQueueItem();
   }
 
@@ -216,6 +218,7 @@ class PlayerController extends GetxController {
           id: song.path,
           title: song.name,
           album: song.ext.toUpperCase(),
+          // artUri can be added here if you have album art extraction
         );
         await _handler!.playFile(song.path, item);
       } else {
@@ -224,30 +227,37 @@ class PlayerController extends GetxController {
         await player.play();
       }
 
-      // Init EQ after first successful play.
-      // Fire-and-forget (no await) — EQ init must not block playback.
-      // _eqInitialized guard prevents re-init on every song change.
-      if (!_eqInitialized) {
-        _initEqualizer();
-      }
+      // ── FIX: EQ initialization ─────────────────────────────────────────
+      // Removed the _eqInitialized guard from PlayerController.
+      // The guard now lives ONLY in EqualizerController._isInitialized.
+      // This ensures EQ init is attempted after every song change,
+      // which fixes the issue where EQ didn't work on some songs because
+      // the session was ready on some formats but not others at init time.
+      // EqualizerController._isInitialized prevents expensive double-init.
+      _initEqualizer();
     } catch (e) {
       error.value = 'Cannot play: ${song.name}';
+      debugPrint('Playback error: $e');
     }
   }
 
-  Future<void> _initEqualizer() async {
-    try {
-      // androidAudioSessionId is only available after setFilePath() succeeds
-      // and only on Android. Returns null on iOS/desktop — handled safely.
-      final sessionId = await player.androidAudioSessionId;
-      if (sessionId == null) return;
-      final eq = Get.find<EqualizerController>();
-      await eq.init(sessionId);
-      _eqInitialized = true;
-    } catch (e) {
-      // EQ not supported on this device — player keeps working fine
-      debugPrint('EQ init skipped (non-fatal): $e');
-    }
+  // ── FIX: Removed async/await — fire-and-forget is correct here ────────────
+  // EQ init must NOT block playback. Using unawaited future pattern.
+  void _initEqualizer() {
+    Future.microtask(() async {
+      try {
+        // androidAudioSessionId is only available after setFilePath() succeeds
+        // and only on Android. Returns null on iOS/desktop — handled safely.
+        final sessionId = await player.androidAudioSessionId;
+        if (sessionId == null) return;
+        if (!Get.isRegistered<EqualizerController>()) return;
+        final eq = Get.find<EqualizerController>();
+        await eq.init(sessionId);
+      } catch (e) {
+        // EQ not supported on this device — player keeps working fine
+        debugPrint('EQ init skipped (non-fatal): $e');
+      }
+    });
   }
 
   void _onTrackComplete() {
@@ -397,7 +407,6 @@ class PlayerController extends GetxController {
 
 // ── Isolate function — runs on a background thread ────────────────────────────
 // Must be a top-level function (not a method) for compute() to work.
-
 List<List<String>> _scanDirsIsolate(List<String> dirPaths) {
   final results = <List<String>>[];
   const supportedExts = {'.mp3', '.flac', '.m4a', '.aac', '.ogg', '.wav'};
