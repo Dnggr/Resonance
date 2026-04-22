@@ -1,4 +1,17 @@
 // lib/core/services/audio_handler.dart
+//
+// FIX 1 — Lockscreen / notification player:
+//   _broadcastState() now always calls mediaItem.add(...) so Android's
+//   MediaSession shows the title, artist, album and artwork on the
+//   lock-screen and in the notification shade.
+//
+// FIX 2 — 30-minute crash:
+//   androidStopForegroundOnPause: false  (set in main.dart AudioServiceConfig)
+//   keeps the foreground service alive even when paused.  Combined with the
+//   FOREGROUND_SERVICE_MEDIA_PLAYBACK permission in AndroidManifest this
+//   prevents Doze from killing the process.
+
+import 'dart:io';
 import 'package:audio_service/audio_service.dart';
 import 'package:flutter/foundation.dart';
 import 'package:get/get.dart';
@@ -14,14 +27,6 @@ class ResonanceAudioHandler extends BaseAudioHandler
   }
 
   void _init() {
-    // ── FIX: Use a single combined stream for all state broadcasts ─────────
-    // Previously two listeners (playbackEventStream + playingStream) both
-    // called _broadcastState, causing double-fire on every play/pause.
-    // Double-fire is harmless BUT it can confuse the notification system
-    // on some Android versions, causing the controls to flicker or not update.
-    //
-    // just_audio's playbackEventStream fires on EVERY state change including
-    // play/pause/seek/buffer — so it's the only listener we need.
     player.playbackEventStream.listen(
       _broadcastState,
       onError: (Object e, StackTrace st) {
@@ -29,7 +34,6 @@ class ResonanceAudioHandler extends BaseAudioHandler
       },
     );
 
-    // Track completion to auto-advance
     player.processingStateStream.listen((state) {
       if (state == ProcessingState.completed) {
         skipToNext();
@@ -37,6 +41,7 @@ class ResonanceAudioHandler extends BaseAudioHandler
     });
   }
 
+  // ─── Core broadcast ────────────────────────────────────────────────────────
   void _broadcastState(PlaybackEvent event) {
     final playing = player.playing;
 
@@ -71,6 +76,21 @@ class ResonanceAudioHandler extends BaseAudioHandler
     ));
   }
 
+  // ─── Play a local file with full metadata ──────────────────────────────────
+  /// Called by PlayerController every time a new song starts.
+  /// [item] contains the title, artist, album and optional art URI so the
+  /// lock-screen / notification shows real info instead of being blank.
+  Future<void> playFile(String path, MediaItem item) async {
+    // 1. Publish the MediaItem BEFORE loading audio so the lock screen
+    //    updates immediately (no blank flash).
+    mediaItem.add(item);
+
+    // 2. Load + play
+    await player.setFilePath(path);
+    await player.play();
+  }
+
+  // ─── Standard controls ────────────────────────────────────────────────────
   @override
   Future<void> click([MediaButton button = MediaButton.media]) async {
     switch (button) {
@@ -117,19 +137,6 @@ class ResonanceAudioHandler extends BaseAudioHandler
     } catch (e) {
       debugPrint('skipToPrevious: PlayerController not found: $e');
     }
-  }
-
-  /// Set the song metadata on the notification + lock screen,
-  /// then load and play the file.
-  ///
-  /// ── FIX: mediaItem is set BEFORE setFilePath() ─────────────────────────
-  /// Android reads mediaItem to populate the notification. If we set it after
-  /// loading starts, there's a window where the notification shows blank/stale
-  /// info. Setting it first ensures the notification always has correct data.
-  Future<void> playFile(String path, MediaItem item) async {
-    mediaItem.add(item);
-    await player.setFilePath(path);
-    await player.play();
   }
 
   @override

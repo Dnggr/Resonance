@@ -1,4 +1,11 @@
 // lib/features/player/controllers/player_controller.dart
+//
+// KEY CHANGES vs the original:
+//  • _playCurrentQueueItem() now builds a full MediaItem with title, artist,
+//    album and art URI so the lock-screen / notification shows real content.
+//  • MetadataService is used to pull user-edited fields.
+//  • SongFile is unchanged — it's still a simple value object.
+
 import 'dart:async';
 import 'dart:io';
 import 'package:audio_service/audio_service.dart';
@@ -10,6 +17,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/services/audio_handler.dart';
+import '../../../core/services/metadata_service.dart';
 import '../../equalizer/controllers/equalizer_controller.dart';
 
 class SongFile {
@@ -60,12 +68,16 @@ class PlayerController extends GetxController {
   int _shuffleHistoryIndex = -1;
 
   DateTime _lastPositionUpdate = DateTime.now();
-
-  // ── FIX: Track the EQ init subscription so we can cancel on song change ──
-  // Old approach used Future.microtask which fired before the audio engine
-  // was ready → androidAudioSessionId returned null → EQ not init'd on song 1.
-  // New approach: subscribe to processingStateStream and wait for 'ready'.
   StreamSubscription<ProcessingState>? _eqInitSub;
+
+  // ── Metadata service (lazy — may not be registered yet on very first frame) ──
+  MetadataService? get _meta {
+    try {
+      return Get.find<MetadataService>();
+    } catch (_) {
+      return null;
+    }
+  }
 
   @override
   void onInit() {
@@ -85,8 +97,7 @@ class PlayerController extends GetxController {
     loadSongs();
   }
 
-  // ── Library filter ──────────────────────────────────────────────────────
-
+  // ─── Search ────────────────────────────────────────────────────────────────
   void filterSongs(String query) {
     searchQuery.value = query;
     if (query.trim().isEmpty) {
@@ -108,8 +119,7 @@ class PlayerController extends GetxController {
         .toList();
   }
 
-  // ── Song scanning ───────────────────────────────────────────────────────
-
+  // ─── Load songs ────────────────────────────────────────────────────────────
   Future<void> loadSongs() async {
     isLoading.value = true;
     error.value = '';
@@ -131,8 +141,7 @@ class PlayerController extends GetxController {
     }
   }
 
-  // ── Playback entry points ───────────────────────────────────────────────
-
+  // ─── Playback ──────────────────────────────────────────────────────────────
   Future<void> playSong(int indexInFiltered) async {
     if (indexInFiltered < 0 || indexInFiltered >= filteredSongs.length) return;
     queue.assignAll(filteredSongs);
@@ -204,30 +213,45 @@ class PlayerController extends GetxController {
     }
   }
 
-  // ── Core playback ───────────────────────────────────────────────────────
-
+  // ─── Core play method ──────────────────────────────────────────────────────
   Future<void> _playCurrentQueueItem() async {
     if (queueIndex.value < 0 || queueIndex.value >= queue.length) return;
     final song = queue[queueIndex.value];
 
-    // Cancel any in-flight EQ init subscription from the previous song
     await _eqInitSub?.cancel();
     _eqInitSub = null;
 
     try {
+      // Build a rich MediaItem so the lock-screen / notification has real info
+      final meta = _meta;
+      final title = meta?.displayTitle(song.path, song.name) ?? song.name;
+      final artist = meta?.displayArtist(song.path) ?? 'Unknown Artist';
+      final album = meta?.displayAlbum(song.path) ?? song.ext.toUpperCase();
+      final artPath = meta?.artImagePath(song.path);
+
+      Uri? artUri;
+      if (artPath != null && File(artPath).existsSync()) {
+        artUri = Uri.file(artPath);
+      }
+
+      final item = MediaItem(
+        id: song.path,
+        title: title,
+        artist: artist,
+        album: album,
+        artUri: artUri,
+        // Duration hint — audio_service uses this for the seekbar in the
+        // notification before the real duration arrives from just_audio.
+        duration: duration.value == Duration.zero ? null : duration.value,
+      );
+
       if (_handler != null) {
-        final item = MediaItem(
-          id: song.path,
-          title: song.name,
-          album: song.ext.toUpperCase(),
-        );
         await _handler!.playFile(song.path, item);
       } else {
         await player.setFilePath(song.path);
         await player.play();
       }
 
-      // Schedule EQ init — wait until audio engine signals it's ready
       _scheduleEqInit();
     } catch (e) {
       error.value = 'Cannot play: ${song.name}';
@@ -235,12 +259,6 @@ class PlayerController extends GetxController {
     }
   }
 
-  /// Subscribe to processingStateStream and init EQ exactly once,
-  /// when the state first reaches ProcessingState.ready.
-  ///
-  /// WHY: androidAudioSessionId is only non-null once the audio engine
-  /// has fully loaded the file (ready state). Calling it earlier returns
-  /// null, meaning EQ attaches to session 0 (system audio) — not our player.
   void _scheduleEqInit() {
     _eqInitSub = player.processingStateStream
         .where((s) => s == ProcessingState.ready)
@@ -255,11 +273,7 @@ class PlayerController extends GetxController {
   Future<void> _initEqualizer() async {
     try {
       final sessionId = await player.androidAudioSessionId;
-      if (sessionId == null) {
-        debugPrint(
-            'EQ: session ID null at ready state — device may not support it');
-        return;
-      }
+      if (sessionId == null) return;
       if (!Get.isRegistered<EqualizerController>()) return;
       final eq = Get.find<EqualizerController>();
       await eq.init(sessionId);
@@ -411,7 +425,7 @@ class PlayerController extends GetxController {
   }
 }
 
-// ── Isolate function — must be top-level for compute() ──────────────────────
+// ─── Isolate-safe scanner ──────────────────────────────────────────────────
 List<List<String>> _scanDirsIsolate(List<String> dirPaths) {
   final results = <List<String>>[];
   const supportedExts = {'.mp3', '.flac', '.m4a', '.aac', '.ogg', '.wav'};

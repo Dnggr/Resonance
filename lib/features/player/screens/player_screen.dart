@@ -1,6 +1,16 @@
+// lib/features/player/screens/player_screen.dart
+//
+// CHANGES:
+//  • Library shows custom art thumbnail per song (if set).
+//  • Mini-player shows custom art.
+//  • Better card-style list items with subtle separators.
+//  • Long-press sheet now includes "Edit Info" shortcut.
+
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import '../../../core/theme/app_theme.dart';
+import '../../../core/services/metadata_service.dart';
 import '../controllers/player_controller.dart';
 import 'now_playing_screen.dart';
 import '../../playlist/screens/playlist_screen.dart';
@@ -111,7 +121,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   Widget _buildHeader(PlayerController ctrl) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 20, 16, 10),
+      padding: const EdgeInsets.fromLTRB(20, 20, 12, 10),
       child: Row(children: [
         Expanded(
           child:
@@ -234,52 +244,97 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
       return ListView.builder(
         itemCount: ctrl.filteredSongs.length,
-        itemExtent: 68,
+        itemExtent: 72,
         addRepaintBoundaries: true,
         addAutomaticKeepAlives: false,
+        padding: const EdgeInsets.only(bottom: 8),
         itemBuilder: (_, i) {
           final song = ctrl.filteredSongs[i];
           return RepaintBoundary(
             child: Obx(() {
               final isCurrent = ctrl.isCurrentSong(song.path);
-              return ListTile(
-                contentPadding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                leading: Container(
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    color: isCurrent
-                        ? AppTheme.primary.withOpacity(0.2)
-                        : Colors.white.withValues(alpha: 0.08),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: isCurrent && ctrl.isPlaying.value
-                      ? const Icon(Icons.equalizer_rounded,
-                          color: AppTheme.primary, size: 18)
-                      : Icon(_iconForExt(song.ext),
-                          color: isCurrent ? AppTheme.primary : Colors.white30,
-                          size: 18),
-                ),
-                title: Text(song.name,
-                    style: TextStyle(
-                      color: isCurrent ? AppTheme.primary : Colors.white,
-                      fontWeight:
-                          isCurrent ? FontWeight.bold : FontWeight.normal,
-                      fontSize: 14,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis),
-                subtitle: Text(song.ext.toUpperCase(),
-                    style:
-                        const TextStyle(color: Colors.white30, fontSize: 11)),
+              final artPath = _artPath(song.path);
+              final hasArt = artPath != null && File(artPath).existsSync();
+
+              return InkWell(
                 onTap: () async {
                   _removeSuggestions();
                   await ctrl.playSong(i);
                   Get.to(() => const NowPlayingScreen(),
                       transition: Transition.downToUp);
                 },
-                onLongPress: () => _showSongOptions(context, ctrl, song),
+                onLongPress: () => _showSongOptions(context, ctrl, song, i),
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: isCurrent
+                        ? AppTheme.primary.withOpacity(0.07)
+                        : Colors.transparent,
+                    border: Border(
+                      bottom: BorderSide(
+                          color: Colors.white.withOpacity(0.05), width: 0.5),
+                    ),
+                  ),
+                  child: Row(children: [
+                    // Thumbnail
+                    Container(
+                      width: 44,
+                      height: 44,
+                      decoration: BoxDecoration(
+                        color: isCurrent
+                            ? AppTheme.primary.withOpacity(0.2)
+                            : Colors.white.withOpacity(0.07),
+                        borderRadius: BorderRadius.circular(10),
+                        image: hasArt
+                            ? DecorationImage(
+                                image: FileImage(File(artPath!)),
+                                fit: BoxFit.cover)
+                            : null,
+                      ),
+                      child: hasArt
+                          ? null
+                          : isCurrent && ctrl.isPlaying.value
+                              ? const Icon(Icons.equalizer_rounded,
+                                  color: AppTheme.primary, size: 20)
+                              : Icon(_iconForExt(song.ext),
+                                  color: isCurrent
+                                      ? AppTheme.primary
+                                      : Colors.white24,
+                                  size: 20),
+                    ),
+                    const SizedBox(width: 12),
+                    // Title + format
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Text(_displayTitle(song),
+                              style: TextStyle(
+                                color:
+                                    isCurrent ? AppTheme.primary : Colors.white,
+                                fontWeight: isCurrent
+                                    ? FontWeight.bold
+                                    : FontWeight.normal,
+                                fontSize: 14,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis),
+                          const SizedBox(height: 2),
+                          Text(_displaySubtitle(song),
+                              style: const TextStyle(
+                                  color: Colors.white38, fontSize: 11),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis),
+                        ],
+                      ),
+                    ),
+                    if (isCurrent)
+                      const Icon(Icons.volume_up_rounded,
+                          color: AppTheme.primary, size: 16),
+                  ]),
+                ),
               );
             }),
           );
@@ -288,8 +343,34 @@ class _PlayerScreenState extends State<PlayerScreen> {
     });
   }
 
+  String? _artPath(String path) {
+    try {
+      return Get.find<MetadataService>().artImagePath(path);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  String _displayTitle(SongFile song) {
+    try {
+      final svc = Get.find<MetadataService>();
+      return svc.displayTitle(song.path, song.name);
+    } catch (_) {
+      return song.name;
+    }
+  }
+
+  String _displaySubtitle(SongFile song) {
+    try {
+      final svc = Get.find<MetadataService>();
+      final artist = svc.displayArtist(song.path);
+      if (artist != 'Unknown Artist') return artist;
+    } catch (_) {}
+    return song.ext.toUpperCase();
+  }
+
   void _showSongOptions(
-      BuildContext context, PlayerController ctrl, SongFile song) {
+      BuildContext context, PlayerController ctrl, SongFile song, int index) {
     showModalBottomSheet(
       context: context,
       backgroundColor: AppTheme.surface,
@@ -318,6 +399,22 @@ class _PlayerScreenState extends State<PlayerScreen> {
           ),
           const SizedBox(height: 16),
           ListTile(
+            leading: const Icon(Icons.edit_rounded, color: AppTheme.primary),
+            title: const Text('Edit Song Info',
+                style: TextStyle(color: Colors.white)),
+            subtitle: const Text('Change title, artist, album & art',
+                style: TextStyle(color: Colors.white38, fontSize: 12)),
+            onTap: () {
+              Get.back();
+              showModalBottomSheet(
+                context: context,
+                isScrollControlled: true,
+                backgroundColor: Colors.transparent,
+                builder: (_) => EditMetadataSheet(song: song),
+              );
+            },
+          ),
+          ListTile(
             leading: const Icon(Icons.queue_play_next_rounded,
                 color: AppTheme.primary),
             title:
@@ -327,17 +424,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
             onTap: () {
               Get.back();
               ctrl.addToPlayNext(song);
-            },
-          ),
-          ListTile(
-            leading:
-                const Icon(Icons.playlist_add_rounded, color: Colors.white54),
-            title: const Text('Add to Playlist',
-                style: TextStyle(color: Colors.white)),
-            onTap: () {
-              Get.back();
-              Get.to(() => const NowPlayingScreen(),
-                  transition: Transition.downToUp);
             },
           ),
           const SizedBox(height: 16),
@@ -357,6 +443,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Mini player
+// ─────────────────────────────────────────────────────────────────────────────
 class _MiniPlayer extends StatelessWidget {
   final PlayerController ctrl;
   const _MiniPlayer({required this.ctrl});
@@ -369,12 +458,24 @@ class _MiniPlayer extends StatelessWidget {
       final dur = ctrl.duration.value.inSeconds.toDouble();
       final pos = ctrl.position.value.inSeconds.toDouble();
 
+      String displayTitle = song.name;
+      String displayArtist = '';
+      String? artPath;
+      try {
+        final svc = Get.find<MetadataService>();
+        displayTitle = svc.displayTitle(song.path, song.name);
+        final a = svc.displayArtist(song.path);
+        if (a != 'Unknown Artist') displayArtist = a;
+        artPath = svc.artImagePath(song.path);
+      } catch (_) {}
+      final hasArt = artPath != null && File(artPath).existsSync();
+
       return GestureDetector(
         onTap: () => Get.to(() => const NowPlayingScreen(),
             transition: Transition.downToUp),
         child: Container(
           margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-          padding: const EdgeInsets.fromLTRB(14, 10, 14, 6),
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
           decoration: BoxDecoration(
             color: AppTheme.surface,
             borderRadius: BorderRadius.circular(16),
@@ -382,30 +483,43 @@ class _MiniPlayer extends StatelessWidget {
           ),
           child: Column(mainAxisSize: MainAxisSize.min, children: [
             Row(children: [
+              // Thumbnail
               Container(
-                width: 36,
-                height: 36,
+                width: 38,
+                height: 38,
                 decoration: BoxDecoration(
                     color: AppTheme.primary.withOpacity(0.2),
-                    borderRadius: BorderRadius.circular(8)),
-                child: const Icon(Icons.music_note_rounded,
-                    color: AppTheme.primary, size: 18),
+                    borderRadius: BorderRadius.circular(8),
+                    image: hasArt
+                        ? DecorationImage(
+                            image: FileImage(File(artPath!)), fit: BoxFit.cover)
+                        : null),
+                child: hasArt
+                    ? null
+                    : const Icon(Icons.music_note_rounded,
+                        color: AppTheme.primary, size: 18),
               ),
               const SizedBox(width: 10),
               Expanded(
                 child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(song.name,
+                      Text(displayTitle,
                           style: const TextStyle(
                               color: Colors.white,
                               fontWeight: FontWeight.w600,
                               fontSize: 13),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis),
-                      Text(ctrl.queueSource.value,
-                          style: const TextStyle(
-                              color: Colors.white38, fontSize: 11)),
+                      Text(
+                        displayArtist.isNotEmpty
+                            ? displayArtist
+                            : ctrl.queueSource.value,
+                        style: const TextStyle(
+                            color: Colors.white38, fontSize: 11),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ]),
               ),
               IconButton(

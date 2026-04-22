@@ -8,8 +8,10 @@ import 'package:hive_flutter/hive_flutter.dart';
 import 'package:just_audio/just_audio.dart';
 import 'core/models/playlist_model.dart';
 import 'core/models/download_record.dart';
+import 'core/models/song_metadata.dart'; // NEW
 import 'core/theme/app_theme.dart';
 import 'core/services/audio_handler.dart';
+import 'core/services/metadata_service.dart'; // NEW
 import 'features/player/screens/player_screen.dart';
 import 'features/downloader/screens/search_screen.dart';
 import 'features/downloader/services/downloader_service.dart';
@@ -17,12 +19,8 @@ import 'features/player/controllers/player_controller.dart';
 import 'features/playlist/controllers/playlist_controller.dart';
 import 'features/equalizer/controllers/equalizer_controller.dart';
 
-// ── Process-level singletons ─────────────────────────────────────────────────
-// Survive hot restart. Never re-create.
 bool _audioServiceInitialized = false;
 ResonanceAudioHandler? _audioHandler;
-
-// Shared player: module-level so it's never GC'd and EQ session stays stable.
 final AudioPlayer _sharedPlayer = AudioPlayer();
 
 void main() async {
@@ -36,12 +34,16 @@ void main() async {
   await Hive.initFlutter();
   Hive.registerAdapter(PlaylistModelAdapter());
   Hive.registerAdapter(DownloadRecordAdapter());
+  Hive.registerAdapter(SongMetadataAdapter()); // NEW
+
   await Hive.openBox<PlaylistModel>('playlists');
   await Hive.openBox<DownloadRecord>('downloads');
+  await Hive.openBox<SongMetadata>('song_metadata'); // NEW
 
   if (!Get.isRegistered<DownloaderService>()) Get.put(DownloaderService());
   if (!Get.isRegistered<PlaylistController>()) Get.put(PlaylistController());
   if (!Get.isRegistered<EqualizerController>()) Get.put(EqualizerController());
+  if (!Get.isRegistered<MetadataService>()) Get.put(MetadataService()); // NEW
 
   runApp(const ResonanceApp());
 }
@@ -59,7 +61,6 @@ class ResonanceApp extends StatelessWidget {
   }
 }
 
-// ── AppBootstrap ─────────────────────────────────────────────────────────────
 class AppBootstrap extends StatefulWidget {
   const AppBootstrap({super.key});
   @override
@@ -92,10 +93,8 @@ class _AppBootstrapState extends State<AppBootstrap> {
             androidNotificationOngoing: true,
             androidShowNotificationBadge: true,
             androidNotificationIcon: 'mipmap/ic_launcher',
-            // ── FIX: These two flags are critical for lock screen controls ──
-            // notificationColor tints the notification on older Android.
-            // androidStopForegroundOnPause: false keeps it alive when paused,
-            // so the user can resume from notification without reopening app.
+            // FIX: Keep foreground service alive when paused — prevents
+            // Android from killing the app after 30 minutes.
             androidStopForegroundOnPause: false,
           ),
         ).timeout(
@@ -105,12 +104,6 @@ class _AppBootstrapState extends State<AppBootstrap> {
 
         _audioServiceInitialized = true;
 
-        // ── FIX: Configure AudioSession for music ─────────────────────────
-        // This tells Android this is a music-category app, which:
-        // 1. Shows the media notification with lock screen controls
-        // 2. Allows other apps to duck audio (e.g. navigation)
-        // 3. Resumes/pauses on headphone connect/disconnect
-        // Without this call, the notification shows but controls are inactive.
         final session = await AudioSession.instance;
         await session.configure(const AudioSessionConfiguration.music());
       }
@@ -123,7 +116,6 @@ class _AppBootstrapState extends State<AppBootstrap> {
     } catch (e) {
       debugPrint('Boot error: $e');
 
-      // Hot-restart: service already running — treat as success
       if (e.toString().contains('_cacheManager')) {
         _audioServiceInitialized = true;
         if (!Get.isRegistered<PlayerController>()) {
@@ -138,7 +130,6 @@ class _AppBootstrapState extends State<AppBootstrap> {
         return;
       }
 
-      // Real failure — register fallback controller so app still works
       if (!Get.isRegistered<PlayerController>()) {
         Get.put(PlayerController());
       }
@@ -157,7 +148,6 @@ class _AppBootstrapState extends State<AppBootstrap> {
 
   @override
   Widget build(BuildContext context) {
-    // ── Error screen ──────────────────────────────────────────────────────
     if (_error != null) {
       return Scaffold(
         backgroundColor: AppTheme.background,
@@ -207,7 +197,6 @@ class _AppBootstrapState extends State<AppBootstrap> {
                     ),
                   ],
                 ),
-                // ── Show technical error in collapsed section ─────────────
                 const SizedBox(height: 20),
                 ExpansionTile(
                   tilePadding: EdgeInsets.zero,
@@ -238,7 +227,6 @@ class _AppBootstrapState extends State<AppBootstrap> {
       );
     }
 
-    // ── Loading screen ────────────────────────────────────────────────────
     if (!_ready) {
       return const Scaffold(
         backgroundColor: AppTheme.background,
@@ -260,7 +248,6 @@ class _AppBootstrapState extends State<AppBootstrap> {
   }
 }
 
-// ── MainShell ─────────────────────────────────────────────────────────────────
 class MainShell extends StatefulWidget {
   const MainShell({super.key});
   @override
