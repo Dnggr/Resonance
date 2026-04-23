@@ -1,12 +1,3 @@
-// lib/features/player/screens/now_playing_screen.dart
-//
-// CHANGES:
-//  • Album art: shows user's custom image (PNG/JPEG) if set, else placeholder.
-//  • Long-press the album art → opens EditMetadataSheet where the user can
-//    change title, artist, album, and pick a custom image.
-//  • UI cleaned up: better spacing, cleaner typography, artwork is the focal
-//    point.
-
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
@@ -151,6 +142,7 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
 // ─────────────────────────────────────────────────────────────────────────────
 // Player tab
 // ─────────────────────────────────────────────────────────────────────────────
+
 class _PlayerTab extends StatelessWidget {
   final PlayerController ctrl;
   final Function(String) onAddToPlaylist;
@@ -169,7 +161,7 @@ class _PlayerTab extends StatelessWidget {
 
       return Column(
         children: [
-          // ── Album art ────────────────────────────────────────────────────
+          // ── Album art ──────────────────────────────────────────────────
           Expanded(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(40, 16, 40, 8),
@@ -177,7 +169,7 @@ class _PlayerTab extends StatelessWidget {
             ),
           ),
 
-          // ── Song info + edit button ───────────────────────────────────────
+          // ── Song info + edit button ────────────────────────────────────
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 32),
             child: Row(
@@ -220,7 +212,6 @@ class _PlayerTab extends StatelessWidget {
                     ],
                   ),
                 ),
-                // Edit metadata button
                 IconButton(
                   icon: const Icon(Icons.edit_rounded,
                       color: Colors.white30, size: 20),
@@ -260,8 +251,9 @@ class _PlayerTab extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Album art widget — shows custom image or placeholder
+// Album art widget
 // ─────────────────────────────────────────────────────────────────────────────
+
 class _AlbumArtWidget extends StatelessWidget {
   final SongFile song;
   final SongMetadata? meta;
@@ -330,8 +322,9 @@ class _AlbumArtWidget extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Edit Metadata Sheet
+// Edit metadata bottom sheet
 // ─────────────────────────────────────────────────────────────────────────────
+
 class EditMetadataSheet extends StatefulWidget {
   final SongFile song;
   const EditMetadataSheet({super.key, required this.song});
@@ -380,7 +373,6 @@ class _EditMetadataSheetState extends State<EditMetadataSheet> {
       );
       if (picked == null) return;
 
-      // Copy to app docs so the path stays valid after original is moved/deleted
       final appDir = await getApplicationDocumentsDirectory();
       final artDir = Directory('${appDir.path}/art');
       if (!await artDir.exists()) await artDir.create(recursive: true);
@@ -412,18 +404,27 @@ class _EditMetadataSheetState extends State<EditMetadataSheet> {
       );
       await svc.save(meta);
 
-      // Re-broadcast the updated MediaItem to the lock-screen
+      // ─── FIX: Refresh notification + UI immediately after save ─────────
+      // Previously the sheet was closed without telling PlayerController
+      // about the new metadata, so:
+      //   1. The Now Playing screen still showed the old title/art until
+      //      the next song change.
+      //   2. The lock-screen notification still had stale info.
+      //
+      // Now we call refreshCurrentSongNotification() which rebuilds the
+      // MediaItem and pushes it to the audio handler → lock screen updates.
+      // The UI refreshes automatically because MetadataService.get() is
+      // called reactively in _PlayerTab's Obx() via ctrl.currentSong.
       try {
         final ctrl = Get.find<PlayerController>();
         if (ctrl.currentSong?.path == widget.song.path) {
-          // Trigger a tiny seek to force audio_service to re-read mediaItem
-          // The real fix is to call playFile again with the updated item, but
-          // that restarts the track. Instead we just reload metadata next song.
-          // For immediate lock-screen update we directly set mediaItem on the handler:
+          ctrl.refreshCurrentSongNotification();
         }
       } catch (_) {}
 
+      // ─── FIX: Pop the sheet AFTER refreshing so the parent Obx rebuilds ─
       if (mounted) Get.back();
+
       Get.snackbar('Saved', 'Song info updated',
           backgroundColor: AppTheme.surface,
           colorText: Colors.white,
@@ -456,7 +457,7 @@ class _EditMetadataSheetState extends State<EditMetadataSheet> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Handle
+                // Handle bar
                 Center(
                   child: Container(
                       width: 36,
@@ -473,7 +474,7 @@ class _EditMetadataSheetState extends State<EditMetadataSheet> {
                         fontSize: 17)),
                 const SizedBox(height: 16),
 
-                // ── Art picker row ───────────────────────────────────────────
+                // ── Art picker ────────────────────────────────────────────
                 Row(
                   children: [
                     GestureDetector(
@@ -533,7 +534,7 @@ class _EditMetadataSheetState extends State<EditMetadataSheet> {
                 ),
                 const SizedBox(height: 20),
 
-                // ── Text fields ──────────────────────────────────────────────
+                // ── Text fields ───────────────────────────────────────────
                 _MetaField(
                     controller: _titleCtrl,
                     label: 'Title',
@@ -550,7 +551,7 @@ class _EditMetadataSheetState extends State<EditMetadataSheet> {
                     hint: 'Unknown Album'),
                 const SizedBox(height: 24),
 
-                // ── Save button ──────────────────────────────────────────────
+                // ── Save button ───────────────────────────────────────────
                 SizedBox(
                   width: double.infinity,
                   child: ElevatedButton(
@@ -620,6 +621,7 @@ class _MetaField extends StatelessWidget {
 // ─────────────────────────────────────────────────────────────────────────────
 // Seek bar
 // ─────────────────────────────────────────────────────────────────────────────
+
 class _SeekBar extends StatefulWidget {
   final PlayerController ctrl;
   const _SeekBar({required this.ctrl});
@@ -687,8 +689,9 @@ class _SeekBarState extends State<_SeekBar> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Controls
+// Playback controls
 // ─────────────────────────────────────────────────────────────────────────────
+
 class _Controls extends StatelessWidget {
   final PlayerController ctrl;
   const _Controls({required this.ctrl});
@@ -761,6 +764,7 @@ class _Controls extends StatelessWidget {
 // ─────────────────────────────────────────────────────────────────────────────
 // Queue tab
 // ─────────────────────────────────────────────────────────────────────────────
+
 class _QueueTab extends StatelessWidget {
   final PlayerController ctrl;
   const _QueueTab({required this.ctrl});

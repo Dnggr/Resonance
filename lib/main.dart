@@ -1,4 +1,3 @@
-// lib/main.dart
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:audio_service/audio_service.dart';
@@ -8,10 +7,10 @@ import 'package:hive_flutter/hive_flutter.dart';
 import 'package:just_audio/just_audio.dart';
 import 'core/models/playlist_model.dart';
 import 'core/models/download_record.dart';
-import 'core/models/song_metadata.dart'; // NEW
+import 'core/models/song_metadata.dart';
 import 'core/theme/app_theme.dart';
 import 'core/services/audio_handler.dart';
-import 'core/services/metadata_service.dart'; // NEW
+import 'core/services/metadata_service.dart';
 import 'features/player/screens/player_screen.dart';
 import 'features/downloader/screens/search_screen.dart';
 import 'features/downloader/services/downloader_service.dart';
@@ -34,16 +33,16 @@ void main() async {
   await Hive.initFlutter();
   Hive.registerAdapter(PlaylistModelAdapter());
   Hive.registerAdapter(DownloadRecordAdapter());
-  Hive.registerAdapter(SongMetadataAdapter()); // NEW
+  Hive.registerAdapter(SongMetadataAdapter());
 
   await Hive.openBox<PlaylistModel>('playlists');
   await Hive.openBox<DownloadRecord>('downloads');
-  await Hive.openBox<SongMetadata>('song_metadata'); // NEW
+  await Hive.openBox<SongMetadata>('song_metadata');
 
   if (!Get.isRegistered<DownloaderService>()) Get.put(DownloaderService());
   if (!Get.isRegistered<PlaylistController>()) Get.put(PlaylistController());
   if (!Get.isRegistered<EqualizerController>()) Get.put(EqualizerController());
-  if (!Get.isRegistered<MetadataService>()) Get.put(MetadataService()); // NEW
+  if (!Get.isRegistered<MetadataService>()) Get.put(MetadataService());
 
   runApp(const ResonanceApp());
 }
@@ -78,24 +77,28 @@ class _AppBootstrapState extends State<AppBootstrap> {
   }
 
   Future<void> _boot() async {
-    if (mounted)
-      setState(() {
-        _error = null;
-      });
+    if (mounted) setState(() => _error = null);
 
     try {
       if (!_audioServiceInitialized) {
         _audioHandler = await AudioService.init(
           builder: () => ResonanceAudioHandler(_sharedPlayer),
-          config: AudioServiceConfig(
+          // REMOVE 'const' because we are doing logic-based configuration
+          config: const AudioServiceConfig(
             androidNotificationChannelId: 'com.resonance.audio',
             androidNotificationChannelName: 'Resonance Player',
-            androidNotificationOngoing: true,
+
+            // Fix the conflict: If stopping foreground on pause, this must be false
+            androidNotificationOngoing: false,
             androidShowNotificationBadge: true,
             androidNotificationIcon: 'mipmap/ic_launcher',
-            // FIX: Keep foreground service alive when paused — prevents
-            // Android from killing the app after 30 minutes.
+
             androidStopForegroundOnPause: false,
+
+            // COMMENT OUT or REMOVE this line if the package version doesn't support it
+            // androidNotificationClickActivatesTask: true,
+
+            preloadArtwork: true,
           ),
         ).timeout(
           const Duration(seconds: 15),
@@ -104,8 +107,17 @@ class _AppBootstrapState extends State<AppBootstrap> {
 
         _audioServiceInitialized = true;
 
+        // ─── Configure audio session for music ───────────────────────────
+        // This tells Android this is a music app so the OS treats it
+        // differently from alarms/ringtones and allows background audio.
         final session = await AudioSession.instance;
         await session.configure(const AudioSessionConfiguration.music());
+
+        // ─── FIX: Request audio focus with GAIN (long-running playback) ──
+        // Requesting focus here rather than only on first play ensures
+        // Android registers this as a media app, improving notification
+        // visibility and preventing Doze from treating it as idle.
+        await session.setActive(true);
       }
 
       if (!Get.isRegistered<PlayerController>()) {

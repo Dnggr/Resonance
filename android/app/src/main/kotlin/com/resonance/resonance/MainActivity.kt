@@ -1,14 +1,15 @@
-// android/app/src/main/kotlin/com/resonance/resonance/MainActivity.kt
-
 package com.resonance.resonance
 
-// ⚠️ CRITICAL: Must be FlutterFragmentActivity — NOT FlutterActivity
-// audio_service checks this at runtime (AudioServicePlugin.java:460)
-// If it finds FlutterActivity it throws IllegalStateException immediately
-import io.flutter.embedding.android.FlutterFragmentActivity
+import com.ryanheise.audioservice.AudioServiceActivity
 import io.flutter.embedding.engine.FlutterEngine
 
-class MainActivity : FlutterFragmentActivity() {
+// ─── FIX: Must extend AudioServiceActivity, NOT FlutterFragmentActivity ───────
+// When MainActivity extends FlutterFragmentActivity, audio_service cannot attach
+// its MediaSession to the activity. The foreground service notification requires
+// the activity to be an AudioServiceActivity so the MediaSession token is
+// properly registered with Android. Without this, the lock-screen / notification
+// player shows blank or never appears at all.
+class MainActivity : AudioServiceActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         flutterEngine.plugins.add(EqualizerPlugin())

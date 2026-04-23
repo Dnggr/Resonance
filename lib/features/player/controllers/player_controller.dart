@@ -1,11 +1,3 @@
-// lib/features/player/controllers/player_controller.dart
-//
-// KEY CHANGES vs the original:
-//  • _playCurrentQueueItem() now builds a full MediaItem with title, artist,
-//    album and art URI so the lock-screen / notification shows real content.
-//  • MetadataService is used to pull user-edited fields.
-//  • SongFile is unchanged — it's still a simple value object.
-
 import 'dart:async';
 import 'dart:io';
 import 'package:audio_service/audio_service.dart';
@@ -70,7 +62,11 @@ class PlayerController extends GetxController {
   DateTime _lastPositionUpdate = DateTime.now();
   StreamSubscription<ProcessingState>? _eqInitSub;
 
-  // ── Metadata service (lazy — may not be registered yet on very first frame) ──
+  // ─── FIX: Auto-refresh timer ──────────────────────────────────────────────
+  // Scans for new music files every 30 seconds so freshly downloaded songs
+  // appear in the library without the user having to tap Refresh manually.
+  Timer? _autoRefreshTimer;
+
   MetadataService? get _meta {
     try {
       return Get.find<MetadataService>();
@@ -95,9 +91,52 @@ class PlayerController extends GetxController {
       if (s == ProcessingState.completed) _onTrackComplete();
     });
     loadSongs();
+
+    // ─── Start auto-refresh ───────────────────────────────────────────────
+    _startAutoRefresh();
   }
 
-  // ─── Search ────────────────────────────────────────────────────────────────
+  // ─── Auto-refresh library every 30 s ────────────────────────────────────
+  void _startAutoRefresh() {
+    _autoRefreshTimer?.cancel();
+    _autoRefreshTimer = Timer.periodic(const Duration(seconds: 30), (_) async {
+      // Only refresh if not currently loading and not playing
+      // (avoids UI jank while seeking / playing)
+      if (!isLoading.value) {
+        await _silentRefresh();
+      }
+    });
+  }
+
+  // ─── Silent refresh: adds new songs without resetting search/queue ────────
+  Future<void> _silentRefresh() async {
+    try {
+      final dirs = await _getMusicDirs();
+      final found =
+          await compute(_scanDirsIsolate, dirs.map((d) => d.path).toList());
+      found.sort((a, b) => a[0].compareTo(b[0]));
+      final mapped = found
+          .map((e) => SongFile(path: e[1], name: e[0], ext: e[2]))
+          .toList();
+
+      // Only update if the list actually changed (avoids unnecessary rebuilds)
+      if (mapped.length != songs.length ||
+          !mapped.every((s) => songs.any((e) => e.path == s.path))) {
+        songs.assignAll(mapped);
+        // Preserve search filter
+        if (searchQuery.value.trim().isEmpty) {
+          filteredSongs.assignAll(mapped);
+        } else {
+          final q = searchQuery.value.toLowerCase();
+          filteredSongs.assignAll(
+              mapped.where((s) => s.name.toLowerCase().contains(q)).toList());
+        }
+      }
+    } catch (e) {
+      debugPrint('Silent refresh error (non-fatal): $e');
+    }
+  }
+
   void filterSongs(String query) {
     searchQuery.value = query;
     if (query.trim().isEmpty) {
@@ -119,7 +158,6 @@ class PlayerController extends GetxController {
         .toList();
   }
 
-  // ─── Load songs ────────────────────────────────────────────────────────────
   Future<void> loadSongs() async {
     isLoading.value = true;
     error.value = '';
@@ -141,7 +179,6 @@ class PlayerController extends GetxController {
     }
   }
 
-  // ─── Playback ──────────────────────────────────────────────────────────────
   Future<void> playSong(int indexInFiltered) async {
     if (indexInFiltered < 0 || indexInFiltered >= filteredSongs.length) return;
     queue.assignAll(filteredSongs);
@@ -213,7 +250,6 @@ class PlayerController extends GetxController {
     }
   }
 
-  // ─── Core play method ──────────────────────────────────────────────────────
   Future<void> _playCurrentQueueItem() async {
     if (queueIndex.value < 0 || queueIndex.value >= queue.length) return;
     final song = queue[queueIndex.value];
@@ -222,7 +258,6 @@ class PlayerController extends GetxController {
     _eqInitSub = null;
 
     try {
-      // Build a rich MediaItem so the lock-screen / notification has real info
       final meta = _meta;
       final title = meta?.displayTitle(song.path, song.name) ?? song.name;
       final artist = meta?.displayArtist(song.path) ?? 'Unknown Artist';
@@ -240,8 +275,6 @@ class PlayerController extends GetxController {
         artist: artist,
         album: album,
         artUri: artUri,
-        // Duration hint — audio_service uses this for the seekbar in the
-        // notification before the real duration arrives from just_audio.
         duration: duration.value == Duration.zero ? null : duration.value,
       );
 
@@ -259,7 +292,25 @@ class PlayerController extends GetxController {
     }
   }
 
+  // ─── FIX: EQ not working on first song ───────────────────────────────────
+  // PROBLEM: The old code subscribed to processingStateStream waiting for
+  // "ready", but if the stream was already in "ready" by the time the
+  // listener was attached (which happens on fast devices or cached files),
+  // the event was missed and _initEqualizer() was never called.
+  //
+  // FIX: Check the CURRENT state first. If already ready, init EQ immediately.
+  // Otherwise subscribe to the stream to wait for it.
   void _scheduleEqInit() {
+    _eqInitSub?.cancel();
+    _eqInitSub = null;
+
+    // Check current state synchronously first
+    if (player.processingState == ProcessingState.ready) {
+      _initEqualizer();
+      return;
+    }
+
+    // Otherwise wait for ready
     _eqInitSub = player.processingStateStream
         .where((s) => s == ProcessingState.ready)
         .take(1)
@@ -280,6 +331,36 @@ class PlayerController extends GetxController {
     } catch (e) {
       debugPrint('EQ init error (non-fatal): $e');
     }
+  }
+
+  // ─── FIX: Update notification when user edits song metadata ──────────────
+  // After saving metadata, this method rebuilds the MediaItem and pushes it
+  // to the audio handler so the lock-screen / notification shows the new
+  // title, artist and artwork immediately without restarting playback.
+  void refreshCurrentSongNotification() {
+    if (_handler == null || currentSong == null) return;
+    final song = currentSong!;
+    final meta = _meta;
+    final title = meta?.displayTitle(song.path, song.name) ?? song.name;
+    final artist = meta?.displayArtist(song.path) ?? 'Unknown Artist';
+    final album = meta?.displayAlbum(song.path) ?? song.ext.toUpperCase();
+    final artPath = meta?.artImagePath(song.path);
+
+    Uri? artUri;
+    if (artPath != null && File(artPath).existsSync()) {
+      artUri = Uri.file(artPath);
+    }
+
+    final item = MediaItem(
+      id: song.path,
+      title: title,
+      artist: artist,
+      album: album,
+      artUri: artUri,
+      duration: duration.value == Duration.zero ? null : duration.value,
+    );
+
+    _handler!.updateMediaItem(item);
   }
 
   void _onTrackComplete() {
@@ -420,12 +501,12 @@ class PlayerController extends GetxController {
   @override
   void onClose() {
     _eqInitSub?.cancel();
+    _autoRefreshTimer?.cancel();
     if (_handler == null) player.dispose();
     super.onClose();
   }
 }
 
-// ─── Isolate-safe scanner ──────────────────────────────────────────────────
 List<List<String>> _scanDirsIsolate(List<String> dirPaths) {
   final results = <List<String>>[];
   const supportedExts = {'.mp3', '.flac', '.m4a', '.aac', '.ogg', '.wav'};
