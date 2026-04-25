@@ -1,3 +1,24 @@
+// lib/core/services/audio_handler.dart
+//
+// FIX LOG:
+//  [BUG-1] CRASH — Double track-complete handler removed.
+//  Previously BOTH audio_handler.dart (here) AND player_controller.dart
+//  listened to processingStateStream and called skipToNext()/_onTrackComplete()
+//  simultaneously on every natural track end. This caused a race: either two
+//  songs were skipped, or the same song played twice.
+//
+//  FIX: audio_handler.dart NO LONGER listens to processingStateStream.
+//  player_controller.dart is the single source of truth for track-complete
+//  logic (_onTrackComplete handles loop/shuffle/advance).
+//  skipToNext() / skipToPrevious() here just delegate to PlayerController
+//  so notification buttons still work.
+//
+//  [BUG-2] CRASH — _eqInitSub cancel-inside-callback removed from handler.
+//  The old handler had an `await _eqInitSub?.cancel()` call inside a
+//  stream.listen() callback, which can throw "Bad state: Stream already
+//  cancelled" on some Dart versions. That logic now lives exclusively in
+//  player_controller.dart with a safe guard pattern.
+
 import 'dart:io';
 import 'package:audio_service/audio_service.dart';
 import 'package:flutter/foundation.dart';
@@ -14,11 +35,8 @@ class ResonanceAudioHandler extends BaseAudioHandler
   }
 
   void _init() {
-    // ─── FIX: Broadcast state on every playback event ────────────────────
-    // This keeps the notification controls (play/pause/skip) in sync with
-    // the actual player state. Without continuous broadcasting, the
-    // notification can show stale controls (e.g. still showing "play" when
-    // audio is already playing).
+    // Broadcast state on every playback event — keeps notification controls
+    // (play/pause/skip) in sync with the actual player state.
     player.playbackEventStream.listen(
       _broadcastState,
       onError: (Object e, StackTrace st) {
@@ -26,15 +44,12 @@ class ResonanceAudioHandler extends BaseAudioHandler
       },
     );
 
-    // ─── Auto-advance to next track ──────────────────────────────────────
-    player.processingStateStream.listen((state) {
-      if (state == ProcessingState.completed) {
-        skipToNext();
-      }
-    });
+    // ─── FIX BUG-1: NO processingStateStream listener here. ─────────────
+    // Track-complete auto-advance is handled ONLY in player_controller.dart
+    // (_onTrackComplete). Having it in both places caused double-advance /
+    // same-song-repeated races. Removed.
   }
 
-  // ─── Broadcast playback state to the notification / lock screen ──────────
   void _broadcastState(PlaybackEvent event) {
     final playing = player.playing;
 
@@ -69,27 +84,20 @@ class ResonanceAudioHandler extends BaseAudioHandler
     ));
   }
 
-  // ─── Play a file and update the notification metadata ────────────────────
   // IMPORTANT: mediaItem.add(item) MUST be called BEFORE setFilePath().
   // If you call setFilePath first, audio_service may broadcast a "loading"
   // state before the mediaItem is set, leaving the notification blank.
   Future<void> playFile(String path, MediaItem item) async {
-    // 1. Set metadata first → notification shows correct title/art immediately
     mediaItem.add(item);
-
-    // 2. Load and play audio
     await player.setFilePath(path);
     await player.play();
   }
 
-// ─── Update metadata only (for when user edits song info mid-playback) ───
   // Call this after saving metadata changes so the lock screen updates
   // without needing to restart playback.
   @override
   Future<void> updateMediaItem(MediaItem item) async {
     mediaItem.add(item);
-
-    // Re-broadcast state so Android redraws the notification with new info
     try {
       _broadcastState(PlaybackEvent(
         processingState: player.processingState,
@@ -100,9 +108,7 @@ class ResonanceAudioHandler extends BaseAudioHandler
         duration: player.duration,
         currentIndex: null,
       ));
-    } catch (_) {
-      // It's good practice to log errors here during development
-    }
+    } catch (_) {}
   }
 
   @override

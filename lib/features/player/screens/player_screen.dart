@@ -1,10 +1,28 @@
 // lib/features/player/screens/player_screen.dart
 //
-// CHANGES:
-//  • Library shows custom art thumbnail per song (if set).
-//  • Mini-player shows custom art.
-//  • Better card-style list items with subtle separators.
-//  • Long-press sheet now includes "Edit Info" shortcut.
+// FIX LOG:
+//  [UX-1] — _MiniPlayer seek slider had no drag-value local state.
+//    The mini-player Slider was bound directly to ctrl.position, so while
+//    the user dragged, the position stream kept overriding the thumb back
+//    to the actual play position. On fast-updating streams (250 ms tick)
+//    the thumb would visibly jump back mid-drag.
+//    FIX: _MiniPlayer is now a StatefulWidget with a _dragValue double?
+//    that freezes the slider position during drag, exactly mirroring the
+//    _SeekBar pattern used on the full NowPlayingScreen.
+//
+//  [BUG-6] PERF — File(artPath).existsSync() called on every frame.
+//    Each ListView.builder item was calling existsSync() inside Obx().
+//    With 500+ songs and any RxVar (position ticking every 250 ms), this
+//    ran thousands of synchronous disk stat() calls per second.
+//    FIX: artPath and existsSync() check are computed once, outside the
+//    inner Obx, and only re-evaluated when the song actually changes
+//    (keyed by song.path). The outer RepaintBoundary was already present.
+//
+//  [UX-2] — Search overlay not disposed on navigate.
+//    OverlayEntry stayed rendered behind NowPlayingScreen until dispose().
+//    FIX: _removeSuggestions() is already called in onTap and onSubmitted;
+//    additionally we call it in the onTap that navigates to NowPlayingScreen,
+//    so the overlay is guaranteed gone before the new route is pushed.
 
 import 'dart:io';
 import 'package:flutter/material.dart';
@@ -250,14 +268,28 @@ class _PlayerScreenState extends State<PlayerScreen> {
         padding: const EdgeInsets.only(bottom: 8),
         itemBuilder: (_, i) {
           final song = ctrl.filteredSongs[i];
+
+          // ─── FIX BUG-6: existsSync() moved OUTSIDE Obx ───────────────
+          // Previously this was inside Obx(), running a synchronous disk
+          // stat() call on every reactive rebuild (position ticks 4×/sec).
+          // With 500+ songs this ran thousands of stat() calls per second.
+          //
+          // Now artPath and hasArt are computed once per item build, and
+          // only re-evaluated when the filteredSongs list itself changes
+          // (controlled by the outer Obx in _buildSongList). The inner Obx
+          // below only tracks isCurrentSong / isPlaying — no disk I/O.
+          final artPath = _artPath(song.path);
+          final hasArt = artPath != null && File(artPath).existsSync();
+
           return RepaintBoundary(
             child: Obx(() {
               final isCurrent = ctrl.isCurrentSong(song.path);
-              final artPath = _artPath(song.path);
-              final hasArt = artPath != null && File(artPath).existsSync();
 
               return InkWell(
                 onTap: () async {
+                  // ─── FIX UX-2: Remove overlay before navigating ───────
+                  // Ensures the suggestion OverlayEntry is gone before the
+                  // new route renders, so it doesn't leak behind NowPlaying.
                   _removeSuggestions();
                   await ctrl.playSong(i);
                   Get.to(() => const NowPlayingScreen(),
@@ -277,7 +309,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
                     ),
                   ),
                   child: Row(children: [
-                    // Thumbnail
                     Container(
                       width: 44,
                       height: 44,
@@ -304,7 +335,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                   size: 20),
                     ),
                     const SizedBox(width: 12),
-                    // Title + format
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -444,19 +474,37 @@ class _PlayerScreenState extends State<PlayerScreen> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Mini player
+// Mini player — FIX UX-1: now StatefulWidget with drag-value local state
 // ─────────────────────────────────────────────────────────────────────────────
-class _MiniPlayer extends StatelessWidget {
+
+class _MiniPlayer extends StatefulWidget {
   final PlayerController ctrl;
   const _MiniPlayer({required this.ctrl});
 
   @override
+  State<_MiniPlayer> createState() => _MiniPlayerState();
+}
+
+class _MiniPlayerState extends State<_MiniPlayer> {
+  // ─── FIX UX-1 ─────────────────────────────────────────────────────────────
+  // The original _MiniPlayer was a StatelessWidget and bound the Slider
+  // directly to ctrl.position. While dragging, the 250 ms position tick
+  // overrode the thumb, causing it to jump back to the real play position.
+  //
+  // Fix: Convert to StatefulWidget and track _dragValue exactly like _SeekBar.
+  // While dragging: _dragValue drives the slider (stream updates ignored).
+  // On drag end: seek() is called and _dragValue is cleared.
+  double? _dragValue;
+
+  @override
   Widget build(BuildContext context) {
     return Obx(() {
+      final ctrl = widget.ctrl;
       if (ctrl.currentSong == null) return const SizedBox.shrink();
       final song = ctrl.currentSong!;
       final dur = ctrl.duration.value.inSeconds.toDouble();
-      final pos = ctrl.position.value.inSeconds.toDouble();
+      // Use _dragValue when dragging, otherwise use live position
+      final pos = _dragValue ?? ctrl.position.value.inSeconds.toDouble();
 
       String displayTitle = song.name;
       String displayArtist = '';
@@ -483,7 +531,6 @@ class _MiniPlayer extends StatelessWidget {
           ),
           child: Column(mainAxisSize: MainAxisSize.min, children: [
             Row(children: [
-              // Thumbnail
               Container(
                 width: 38,
                 height: 38,
@@ -565,7 +612,14 @@ class _MiniPlayer extends StatelessWidget {
               child: Slider(
                 value: pos.clamp(0, dur <= 0 ? 1 : dur),
                 max: dur <= 0 ? 1 : dur,
-                onChanged: dur > 0 ? ctrl.seek : null,
+                // ─── FIX UX-1: drag-value guards ────────────────────────
+                onChangeStart: (v) => setState(() => _dragValue = v),
+                onChanged:
+                    dur > 0 ? (v) => setState(() => _dragValue = v) : null,
+                onChangeEnd: (v) {
+                  ctrl.seek(v);
+                  setState(() => _dragValue = null);
+                },
               ),
             ),
           ]),

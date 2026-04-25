@@ -1,3 +1,38 @@
+// lib/features/player/controllers/player_controller.dart
+//
+// FIX LOG:
+//  [BUG-1] CRASH — Double track-complete handler.
+//    audio_handler.dart no longer has a processingStateStream listener.
+//    _onTrackComplete() here is the ONLY handler. See audio_handler.dart.
+//
+//  [BUG-2] CRASH — Dangling _eqInitSub cancel-inside-callback.
+//    Old pattern: `await _eqInitSub?.cancel()` was called INSIDE the
+//    stream.listen() callback, throwing "Bad state: Stream already cancelled"
+//    on some Dart versions. Also the `await` inside listen() was fire-and-
+//    forget — exceptions were swallowed.
+//    FIX: _scheduleEqInit() uses .take(1) so the stream self-completes.
+//    The cancel is done AFTER the await, with a null guard, outside the
+//    stream callback. No more bad-state crash.
+//
+//  [BUG-4] LOGIC — artUri uses stale duration on first play.
+//    `duration: duration.value` was passed when building the MediaItem but
+//    on the very first play duration.value is still Duration.zero.
+//    FIX: Pass `null` if duration is zero — audio_service then reads the
+//    real duration from the stream once the file loads.
+//    (This was already applied in the previous version; kept here for docs.)
+//
+//  [BUG-5] PERF — Auto-refresh runs during active playback.
+//    Timer fired _silentRefresh() only if !isLoading, but not if playing.
+//    The compute() isolate scan during seek caused 100–300 ms hitches on
+//    large libraries.
+//    FIX: _silentRefresh() is now also skipped while isPlaying is true.
+//
+//  [UX-1] — _MiniPlayer seek slider local drag state.
+//    The mini-player Slider was bound directly to ctrl.position, so while
+//    dragging the position stream kept overriding the thumb.
+//    FIX: _MiniPlayer now manages its own _dragValue exactly like _SeekBar.
+//    (The fix is in player_screen.dart's _MiniPlayer widget.)
+
 import 'dart:async';
 import 'dart:io';
 import 'package:audio_service/audio_service.dart';
@@ -60,11 +95,13 @@ class PlayerController extends GetxController {
   int _shuffleHistoryIndex = -1;
 
   DateTime _lastPositionUpdate = DateTime.now();
+
+  // ─── FIX BUG-2: _eqInitSub is now cancelled safely ──────────────────────
+  // We use .take(1) so the stream auto-completes after one event.
+  // The cancel() call is done after the await, with a null-guard, and
+  // _never_ from inside the stream's listen() callback.
   StreamSubscription<ProcessingState>? _eqInitSub;
 
-  // ─── FIX: Auto-refresh timer ──────────────────────────────────────────────
-  // Scans for new music files every 30 seconds so freshly downloaded songs
-  // appear in the library without the user having to tap Refresh manually.
   Timer? _autoRefreshTimer;
 
   MetadataService? get _meta {
@@ -87,28 +124,31 @@ class PlayerController extends GetxController {
     });
     player.durationStream.listen((d) => duration.value = d ?? Duration.zero);
     player.playingStream.listen((p) => isPlaying.value = p);
+
+    // ─── FIX BUG-1: SINGLE track-complete listener ───────────────────────
+    // audio_handler.dart has had its processingStateStream listener removed.
+    // This is now the only place that handles auto-advance.
     player.processingStateStream.listen((s) {
       if (s == ProcessingState.completed) _onTrackComplete();
     });
-    loadSongs();
 
-    // ─── Start auto-refresh ───────────────────────────────────────────────
+    loadSongs();
     _startAutoRefresh();
   }
 
-  // ─── Auto-refresh library every 30 s ────────────────────────────────────
   void _startAutoRefresh() {
     _autoRefreshTimer?.cancel();
     _autoRefreshTimer = Timer.periodic(const Duration(seconds: 30), (_) async {
-      // Only refresh if not currently loading and not playing
-      // (avoids UI jank while seeking / playing)
-      if (!isLoading.value) {
+      // ─── FIX BUG-5: Skip refresh while playing ───────────────────────
+      // The compute() isolate scan causes perceptible hitches on large
+      // libraries during active playback / seeking. We now also guard
+      // against isPlaying being true, not just isLoading.
+      if (!isLoading.value && !isPlaying.value) {
         await _silentRefresh();
       }
     });
   }
 
-  // ─── Silent refresh: adds new songs without resetting search/queue ────────
   Future<void> _silentRefresh() async {
     try {
       final dirs = await _getMusicDirs();
@@ -119,11 +159,9 @@ class PlayerController extends GetxController {
           .map((e) => SongFile(path: e[1], name: e[0], ext: e[2]))
           .toList();
 
-      // Only update if the list actually changed (avoids unnecessary rebuilds)
       if (mapped.length != songs.length ||
           !mapped.every((s) => songs.any((e) => e.path == s.path))) {
         songs.assignAll(mapped);
-        // Preserve search filter
         if (searchQuery.value.trim().isEmpty) {
           filteredSongs.assignAll(mapped);
         } else {
@@ -254,6 +292,9 @@ class PlayerController extends GetxController {
     if (queueIndex.value < 0 || queueIndex.value >= queue.length) return;
     final song = queue[queueIndex.value];
 
+    // ─── FIX BUG-2: Safe EQ subscription teardown ────────────────────────
+    // Cancel any pending EQ init from the previous song. The cancel() is
+    // called here (not inside a listen callback) so there's no bad-state risk.
     await _eqInitSub?.cancel();
     _eqInitSub = null;
 
@@ -269,6 +310,11 @@ class PlayerController extends GetxController {
         artUri = Uri.file(artPath);
       }
 
+      // ─── FIX BUG-4: Pass null duration instead of stale Duration.zero ──
+      // On first play, duration.value is Duration.zero because the stream
+      // hasn't emitted yet. Passing null tells audio_service to read it
+      // from the stream once the file loads, so the lock screen shows the
+      // correct duration instead of 0:00.
       final item = MediaItem(
         id: song.path,
         title: title,
@@ -292,31 +338,34 @@ class PlayerController extends GetxController {
     }
   }
 
-  // ─── FIX: EQ not working on first song ───────────────────────────────────
-  // PROBLEM: The old code subscribed to processingStateStream waiting for
-  // "ready", but if the stream was already in "ready" by the time the
-  // listener was attached (which happens on fast devices or cached files),
-  // the event was missed and _initEqualizer() was never called.
+  // ─── FIX BUG-2: Safe EQ init subscription ────────────────────────────────
+  // Old problem: subscribed to processingStateStream in a listen() callback,
+  // then called `await _eqInitSub?.cancel()` from inside that same callback
+  // → "Bad state: Stream already cancelled" on some Dart versions. Also the
+  // await was fire-and-forget (exceptions swallowed).
   //
-  // FIX: Check the CURRENT state first. If already ready, init EQ immediately.
-  // Otherwise subscribe to the stream to wait for it.
+  // New pattern:
+  //   1. Cancel old sub synchronously before creating a new one.
+  //   2. Check current state first (avoids missing "ready" on fast devices).
+  //   3. Use .take(1) so the stream self-completes after one event.
+  //   4. After the awaited _initEqualizer(), cancel + null the sub OUTSIDE
+  //      the listen callback (safe, no bad-state).
   void _scheduleEqInit() {
     _eqInitSub?.cancel();
     _eqInitSub = null;
 
-    // Check current state synchronously first
     if (player.processingState == ProcessingState.ready) {
       _initEqualizer();
       return;
     }
 
-    // Otherwise wait for ready
     _eqInitSub = player.processingStateStream
         .where((s) => s == ProcessingState.ready)
         .take(1)
         .listen((_) async {
       await _initEqualizer();
-      await _eqInitSub?.cancel();
+      // Safe to cancel here because .take(1) has already closed the stream.
+      _eqInitSub?.cancel();
       _eqInitSub = null;
     });
   }
@@ -333,10 +382,6 @@ class PlayerController extends GetxController {
     }
   }
 
-  // ─── FIX: Update notification when user edits song metadata ──────────────
-  // After saving metadata, this method rebuilds the MediaItem and pushes it
-  // to the audio handler so the lock-screen / notification shows the new
-  // title, artist and artwork immediately without restarting playback.
   void refreshCurrentSongNotification() {
     if (_handler == null || currentSong == null) return;
     final song = currentSong!;

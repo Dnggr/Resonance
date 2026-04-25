@@ -1,3 +1,12 @@
+// lib/features/downloader/services/downloader_service.dart
+//
+// FIX LOG:
+//  [BUG-3] LOGIC — Download complete notification fired twice.
+//    In _completeTask(), NotificationService.showDownloadDone() was called
+//    twice in a row (copy-paste leftover). Every finished download showed
+//    two system notifications.
+//    FIX: Removed the duplicate call. showDownloadDone() is now called once.
+
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
@@ -63,11 +72,8 @@ class DownloaderService extends GetxController {
     downloadHistory.assignAll(_historyBox.values.toList().reversed.toList());
   }
 
-  // ─── Creates a fresh YT instance with multiple client fallbacks ──
-  // Using multiple clients dramatically improves reliability
   YoutubeExplode _freshYt() => YoutubeExplode();
 
-  // ─── The client list that gives us the best success rate ────────
   static final _manifestClients = [
     YoutubeApiClient.ios,
     YoutubeApiClient.androidVr,
@@ -75,7 +81,6 @@ class DownloaderService extends GetxController {
     YoutubeApiClient.android,
   ];
 
-  // ─── Search ──────────────────────────────────────────────────────
   Future<void> searchMusic(String query) async {
     if (query.trim().isEmpty) return;
     searchResults.clear();
@@ -110,19 +115,14 @@ class DownloaderService extends GetxController {
     searchSuggestions.assignAll(titles);
   }
 
-  // ─── Get preview URL — tries multiple clients until one works ────
   Future<String?> getPreviewUrl(String videoId) async {
-    // Try each client in order — first success wins
     for (final client in _manifestClients) {
       final yt = _freshYt();
       try {
         final manifest =
             await yt.videos.streams.getManifest(videoId, ytClients: [client]);
-
-        // audioOnly = streams with audio but no video track
         final streams = manifest.audioOnly;
         if (streams.isEmpty) continue;
-
         final best = streams.withHighestBitrate();
         final url = best.url.toString();
         if (url.isNotEmpty) return url;
@@ -136,7 +136,6 @@ class DownloaderService extends GetxController {
     return null;
   }
 
-  // ─── Queue download ──────────────────────────────────────────────
   Future<void> queueDownload(dynamic video, DownloadFormat format) async {
     final videoId = (video.id?.value ?? video.id).toString();
     final exists =
@@ -187,7 +186,6 @@ class DownloaderService extends GetxController {
 
       task.statusLabel.value = 'Fetching stream info...';
 
-      // Try each client until we get a working manifest
       StreamManifest? manifest;
       for (final client in _manifestClients) {
         if (task.cancelled) return;
@@ -196,8 +194,6 @@ class DownloaderService extends GetxController {
           yt = _freshYt();
           manifest = await yt.videos.streams
               .getManifest(task.videoId, ytClients: [client]);
-
-          // Verify we actually got audio streams
           if (manifest.audioOnly.isNotEmpty) {
             debugPrint('Got manifest with client: $client');
             break;
@@ -219,7 +215,6 @@ class DownloaderService extends GetxController {
       final kbps = (streamInfo.bitrate.bitsPerSecond / 1000).round();
       task.statusLabel.value = 'Stream ready · ${kbps}kbps';
 
-      // Resume support
       final file = File(filePath);
       int existingBytes = 0;
       if (await file.exists()) {
@@ -233,8 +228,6 @@ class DownloaderService extends GetxController {
       task.status.value = DownloadStatus.downloading;
       task.statusLabel.value = 'Downloading...';
 
-      // Download using the stream from the same yt instance
-      // that produced the manifest — DO NOT create a new instance here
       final stream = yt!.videos.streams.get(streamInfo);
       final sink = file.openWrite(
           mode: existingBytes > 0 ? FileMode.append : FileMode.write);
@@ -274,10 +267,8 @@ class DownloaderService extends GetxController {
             lastBytes = downloaded;
             lastTime = now;
 
-            // 🔔 Update notification
             final pct =
                 totalBytes > 0 ? ((downloaded / totalBytes) * 100).round() : -1;
-
             NotificationService.showDownloadProgress(
               id: notifId,
               title: task.title,
@@ -298,7 +289,6 @@ class DownloaderService extends GetxController {
 
       await _completeTask(task, filePath, notifId);
     } catch (e) {
-      // Clean up partial/empty file — don't pollute library
       if (filePath != null) {
         try {
           final f = File(filePath);
@@ -331,16 +321,16 @@ class DownloaderService extends GetxController {
       format: task.formatLabel,
       downloadedAt: DateTime.now(),
     );
+
+    // ─── FIX BUG-3: showDownloadDone called only ONCE ────────────────────
+    // Previously it was called twice in a row (copy-paste leftover).
+    // Every finished download showed two system notifications.
     await NotificationService.showDownloadDone(
       id: notifId,
       title: task.title,
       format: task.formatLabel,
     );
-    await NotificationService.showDownloadDone(
-      id: notifId,
-      title: task.title,
-      format: task.formatLabel,
-    );
+
     await _historyBox.put(task.videoId + task.formatLabel, record);
     downloadHistory.insert(0, record);
     activeDownloads.remove(task);
