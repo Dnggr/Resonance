@@ -102,9 +102,7 @@ class PlaylistScreen extends StatelessWidget {
 
                   final allSongs = pl.songPaths.map((path) {
                     final name = path.split('/').last.replaceAll(
-                        RegExp(r'\.(mp3|flac|m4a|aac|wav|ogg)$',
-                            caseSensitive: false),
-                        '');
+                        RegExp(r'\.(mp3|flac|m4a)$', caseSensitive: false), '');
                     final ext = path.split('.').last.toLowerCase();
                     return SongFile(path: path, name: name, ext: ext);
                   }).toList();
@@ -275,9 +273,7 @@ class PlaylistDetailScreen extends StatelessWidget {
                 itemBuilder: (_, i) {
                   final path = pl.songPaths[i];
                   final name = path.split('/').last.replaceAll(
-                      RegExp(r'\.(mp3|flac|m4a|aac|wav|ogg)$',
-                          caseSensitive: false),
-                      '');
+                      RegExp(r'\.(mp3|flac|m4a)$', caseSensitive: false), '');
                   final ext = path.split('.').last.toLowerCase();
 
                   return ListTile(
@@ -298,8 +294,7 @@ class PlaylistDetailScreen extends StatelessWidget {
                       // Build the full playlist and start from song index `i`
                       final allSongs = pl.songPaths.map((p) {
                         final n = p.split('/').last.replaceAll(
-                            RegExp(r'\.(mp3|flac|m4a|aac|wav|ogg)$',
-                                caseSensitive: false),
+                            RegExp(r'\.(mp3|flac|m4a)$', caseSensitive: false),
                             '');
                         final e = p.split('.').last.toLowerCase();
                         return SongFile(path: p, name: n, ext: e);

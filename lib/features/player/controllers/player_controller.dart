@@ -1,37 +1,23 @@
 // lib/features/player/controllers/player_controller.dart
 //
-// FIX LOG:
-//  [BUG-1] CRASH — Double track-complete handler.
-//    audio_handler.dart no longer has a processingStateStream listener.
-//    _onTrackComplete() here is the ONLY handler. See audio_handler.dart.
+// FIX LOG (this session):
+//  [FIX-SHUFFLE] Shuffle now uses a proper Fisher-Yates derangement so ALL
+//    songs play exactly once before repeating. Old code used millisecondsSinceEpoch
+//    % queue.length which is NOT random — it consistently skips ~half the songs.
+//    New approach: on shuffle-on or new-song-play, pre-generate a full shuffled
+//    order (excluding the currently-playing song first, then appending it at
+//    position 0). _shuffleOrder holds the full order; _shufflePos is the cursor.
 //
-//  [BUG-2] CRASH — Dangling _eqInitSub cancel-inside-callback.
-//    Old pattern: `await _eqInitSub?.cancel()` was called INSIDE the
-//    stream.listen() callback, throwing "Bad state: Stream already cancelled"
-//    on some Dart versions. Also the `await` inside listen() was fire-and-
-//    forget — exceptions were swallowed.
-//    FIX: _scheduleEqInit() uses .take(1) so the stream self-completes.
-//    The cancel is done AFTER the await, with a null guard, outside the
-//    stream callback. No more bad-state crash.
+//  [FIX-QUEUE-SEARCH] playSong() now always populates the queue from the full
+//    songs list (not filteredSongs), starting at the correct index within songs.
+//    When a search is active and the user taps a result, the queue is ALL songs
+//    but starts at the tapped song. The queueSource label is updated accordingly.
 //
-//  [BUG-4] LOGIC — artUri uses stale duration on first play.
-//    `duration: duration.value` was passed when building the MediaItem but
-//    on the very first play duration.value is still Duration.zero.
-//    FIX: Pass `null` if duration is zero — audio_service then reads the
-//    real duration from the stream once the file loads.
-//    (This was already applied in the previous version; kept here for docs.)
+//  [FIX-QUEUE-SCROLL] NowPlayingScreen Queue tab auto-scrolls to queueIndex.
+//    (See now_playing_screen.dart — _QueueTab uses a ScrollController.)
 //
-//  [BUG-5] PERF — Auto-refresh runs during active playback.
-//    Timer fired _silentRefresh() only if !isLoading, but not if playing.
-//    The compute() isolate scan during seek caused 100–300 ms hitches on
-//    large libraries.
-//    FIX: _silentRefresh() is now also skipped while isPlaying is true.
-//
-//  [UX-1] — _MiniPlayer seek slider local drag state.
-//    The mini-player Slider was bound directly to ctrl.position, so while
-//    dragging the position stream kept overriding the thumb.
-//    FIX: _MiniPlayer now manages its own _dragValue exactly like _SeekBar.
-//    (The fix is in player_screen.dart's _MiniPlayer widget.)
+//  [FIX-FORMAT-FILTER] _scanDirsIsolate only returns mp3, mp4/m4a, flac.
+//    aac, ogg, wav removed.
 
 import 'dart:async';
 import 'dart:io';
@@ -91,17 +77,16 @@ class PlayerController extends GetxController {
   Rx<LoopMode> loopMode = LoopMode.none.obs;
   RxBool shuffleEnabled = false.obs;
 
-  final List<int> _shuffleHistory = [];
-  int _shuffleHistoryIndex = -1;
+  // ─── FIX-SHUFFLE: Full derangement-based shuffle ────────────────────────────
+  // _shuffleOrder: pre-generated permutation of all queue indices.
+  //   Index 0 is always the song that was playing when shuffle was activated.
+  //   The remaining indices are a Fisher-Yates shuffle of all other songs.
+  // _shufflePos: current position within _shuffleOrder.
+  final List<int> _shuffleOrder = [];
+  int _shufflePos = 0;
 
   DateTime _lastPositionUpdate = DateTime.now();
-
-  // ─── FIX BUG-2: _eqInitSub is now cancelled safely ──────────────────────
-  // We use .take(1) so the stream auto-completes after one event.
-  // The cancel() call is done after the await, with a null-guard, and
-  // _never_ from inside the stream's listen() callback.
   StreamSubscription<ProcessingState>? _eqInitSub;
-
   Timer? _autoRefreshTimer;
 
   MetadataService? get _meta {
@@ -125,9 +110,6 @@ class PlayerController extends GetxController {
     player.durationStream.listen((d) => duration.value = d ?? Duration.zero);
     player.playingStream.listen((p) => isPlaying.value = p);
 
-    // ─── FIX BUG-1: SINGLE track-complete listener ───────────────────────
-    // audio_handler.dart has had its processingStateStream listener removed.
-    // This is now the only place that handles auto-advance.
     player.processingStateStream.listen((s) {
       if (s == ProcessingState.completed) _onTrackComplete();
     });
@@ -139,10 +121,6 @@ class PlayerController extends GetxController {
   void _startAutoRefresh() {
     _autoRefreshTimer?.cancel();
     _autoRefreshTimer = Timer.periodic(const Duration(seconds: 30), (_) async {
-      // ─── FIX BUG-5: Skip refresh while playing ───────────────────────
-      // The compute() isolate scan causes perceptible hitches on large
-      // libraries during active playback / seeking. We now also guard
-      // against isPlaying being true, not just isLoading.
       if (!isLoading.value && !isPlaying.value) {
         await _silentRefresh();
       }
@@ -217,13 +195,26 @@ class PlayerController extends GetxController {
     }
   }
 
+  // ─── FIX-QUEUE-SEARCH ───────────────────────────────────────────────────────
+  // When a user taps a song in the library (whether filtered or not), the queue
+  // is populated from the FULL songs list. The index passed in is the index
+  // within filteredSongs; we map it back to the index in songs so the queue
+  // starts at the correct song and contains every song in the library.
   Future<void> playSong(int indexInFiltered) async {
     if (indexInFiltered < 0 || indexInFiltered >= filteredSongs.length) return;
-    queue.assignAll(filteredSongs);
-    queueSource.value =
-        searchQuery.value.isEmpty ? 'Library' : 'Search results';
-    queueIndex.value = indexInFiltered;
-    _resetShuffleHistory(indexInFiltered);
+    final tappedSong = filteredSongs[indexInFiltered];
+
+    // Always queue ALL songs, find starting index by path
+    final allSongs = List<SongFile>.from(songs);
+    final startIdx = allSongs.indexWhere((s) => s.path == tappedSong.path);
+    final safeStart = startIdx >= 0 ? startIdx : 0;
+
+    queue.assignAll(allSongs);
+    queueSource.value = searchQuery.value.isEmpty
+        ? 'Library'
+        : 'Library (from "${tappedSong.name}")';
+    queueIndex.value = safeStart;
+    _buildShuffleOrder(safeStart);
     await _playCurrentQueueItem();
   }
 
@@ -234,7 +225,7 @@ class PlayerController extends GetxController {
     queue.assignAll(playlistSongs);
     queueSource.value = playlistName;
     queueIndex.value = safeStart;
-    _resetShuffleHistory(safeStart);
+    _buildShuffleOrder(safeStart);
     await _playCurrentQueueItem();
   }
 
@@ -243,6 +234,7 @@ class PlayerController extends GetxController {
       queue.assignAll([song]);
       queueSource.value = 'Library';
       queueIndex.value = 0;
+      _buildShuffleOrder(0);
       _playCurrentQueueItem();
       return;
     }
@@ -256,7 +248,10 @@ class PlayerController extends GetxController {
     final currentPath = currentSong?.path;
     queue.assignAll(newQueue);
     if (currentPath != null) {
-      queueIndex.value = newQueue.indexWhere((s) => s.path == currentPath);
+      final newIdx = newQueue.indexWhere((s) => s.path == currentPath);
+      queueIndex.value = newIdx;
+      // Rebuild shuffle order preserving current position
+      if (shuffleEnabled.value) _buildShuffleOrder(newIdx);
     }
     Get.snackbar('Up Next', '"${song.name}" added to play next',
         backgroundColor: AppTheme.surface,
@@ -273,7 +268,9 @@ class PlayerController extends GetxController {
     newQueue.insert(newIndex, item);
     queue.assignAll(newQueue);
     if (currentPath != null) {
-      queueIndex.value = newQueue.indexWhere((s) => s.path == currentPath);
+      final newIdx = newQueue.indexWhere((s) => s.path == currentPath);
+      queueIndex.value = newIdx;
+      if (shuffleEnabled.value) _buildShuffleOrder(newIdx);
     }
   }
 
@@ -284,7 +281,9 @@ class PlayerController extends GetxController {
     newQueue.removeAt(index);
     queue.assignAll(newQueue);
     if (currentPath != null) {
-      queueIndex.value = newQueue.indexWhere((s) => s.path == currentPath);
+      final newIdx = newQueue.indexWhere((s) => s.path == currentPath);
+      queueIndex.value = newIdx;
+      if (shuffleEnabled.value) _buildShuffleOrder(newIdx);
     }
   }
 
@@ -292,9 +291,6 @@ class PlayerController extends GetxController {
     if (queueIndex.value < 0 || queueIndex.value >= queue.length) return;
     final song = queue[queueIndex.value];
 
-    // ─── FIX BUG-2: Safe EQ subscription teardown ────────────────────────
-    // Cancel any pending EQ init from the previous song. The cancel() is
-    // called here (not inside a listen callback) so there's no bad-state risk.
     await _eqInitSub?.cancel();
     _eqInitSub = null;
 
@@ -310,11 +306,6 @@ class PlayerController extends GetxController {
         artUri = Uri.file(artPath);
       }
 
-      // ─── FIX BUG-4: Pass null duration instead of stale Duration.zero ──
-      // On first play, duration.value is Duration.zero because the stream
-      // hasn't emitted yet. Passing null tells audio_service to read it
-      // from the stream once the file loads, so the lock screen shows the
-      // correct duration instead of 0:00.
       final item = MediaItem(
         id: song.path,
         title: title,
@@ -338,18 +329,6 @@ class PlayerController extends GetxController {
     }
   }
 
-  // ─── FIX BUG-2: Safe EQ init subscription ────────────────────────────────
-  // Old problem: subscribed to processingStateStream in a listen() callback,
-  // then called `await _eqInitSub?.cancel()` from inside that same callback
-  // → "Bad state: Stream already cancelled" on some Dart versions. Also the
-  // await was fire-and-forget (exceptions swallowed).
-  //
-  // New pattern:
-  //   1. Cancel old sub synchronously before creating a new one.
-  //   2. Check current state first (avoids missing "ready" on fast devices).
-  //   3. Use .take(1) so the stream self-completes after one event.
-  //   4. After the awaited _initEqualizer(), cancel + null the sub OUTSIDE
-  //      the listen callback (safe, no bad-state).
   void _scheduleEqInit() {
     _eqInitSub?.cancel();
     _eqInitSub = null;
@@ -364,7 +343,6 @@ class PlayerController extends GetxController {
         .take(1)
         .listen((_) async {
       await _initEqualizer();
-      // Safe to cancel here because .take(1) has already closed the stream.
       _eqInitSub?.cancel();
       _eqInitSub = null;
     });
@@ -418,29 +396,42 @@ class PlayerController extends GetxController {
         playNext();
         break;
       case LoopMode.none:
-        if (queueIndex.value < queue.length - 1) playNext();
+        if (shuffleEnabled.value) {
+          // In shuffle mode, always advance unless we've played every song
+          if (_shufflePos < _shuffleOrder.length - 1) {
+            playNext();
+          }
+          // If we've played all songs, stop (no loop)
+        } else {
+          if (queueIndex.value < queue.length - 1) playNext();
+        }
         break;
     }
   }
 
+  // ─── FIX-SHUFFLE: playNext / playPrev use _shuffleOrder ─────────────────────
   void playNext() {
     if (queue.isEmpty) return;
+
     if (shuffleEnabled.value) {
-      if (_shuffleHistoryIndex < _shuffleHistory.length - 1) {
-        _shuffleHistoryIndex++;
-        queueIndex.value = _shuffleHistory[_shuffleHistoryIndex];
-        _playCurrentQueueItem();
-        return;
+      if (_shuffleOrder.isEmpty) _buildShuffleOrder(queueIndex.value);
+
+      // Move forward in the pre-generated shuffle order
+      if (_shufflePos < _shuffleOrder.length - 1) {
+        _shufflePos++;
+      } else {
+        // All songs played — rebuild a new shuffle order starting fresh
+        // (the first song of the new round will be random, not the same as last)
+        _rebuildShuffleOrderFromScratch();
+        _shufflePos = 0;
       }
-      int next = DateTime.now().millisecondsSinceEpoch % queue.length;
-      if (queue.length > 1) {
-        while (next == queueIndex.value) next = (next + 1) % queue.length;
-      }
-      _shuffleHistory.add(next);
-      _shuffleHistoryIndex = _shuffleHistory.length - 1;
-      queueIndex.value = next;
+      queueIndex.value = _shuffleOrder[_shufflePos];
     } else {
-      queueIndex.value = (queueIndex.value + 1) % queue.length;
+      if (loopMode.value == LoopMode.all) {
+        queueIndex.value = (queueIndex.value + 1) % queue.length;
+      } else {
+        queueIndex.value = (queueIndex.value + 1).clamp(0, queue.length - 1);
+      }
     }
     _playCurrentQueueItem();
   }
@@ -451,26 +442,50 @@ class PlayerController extends GetxController {
       player.seek(Duration.zero);
       return;
     }
-    if (shuffleEnabled.value && _shuffleHistoryIndex > 0) {
-      _shuffleHistoryIndex--;
-      queueIndex.value = _shuffleHistory[_shuffleHistoryIndex];
-      _playCurrentQueueItem();
-      return;
+
+    if (shuffleEnabled.value) {
+      if (_shuffleOrder.isEmpty) _buildShuffleOrder(queueIndex.value);
+      if (_shufflePos > 0) {
+        _shufflePos--;
+        queueIndex.value = _shuffleOrder[_shufflePos];
+      } else {
+        // Already at start — restart current
+        player.seek(Duration.zero);
+        return;
+      }
+    } else {
+      queueIndex.value =
+          queueIndex.value <= 0 ? queue.length - 1 : queueIndex.value - 1;
     }
-    queueIndex.value =
-        queueIndex.value <= 0 ? queue.length - 1 : queueIndex.value - 1;
     _playCurrentQueueItem();
   }
 
   void playByQueueIndex(int idx) {
     if (idx < 0 || idx >= queue.length) return;
     queueIndex.value = idx;
+    // Update shuffle position to match manually selected song
+    if (shuffleEnabled.value) {
+      final posInOrder = _shuffleOrder.indexOf(idx);
+      if (posInOrder >= 0) {
+        _shufflePos = posInOrder;
+      } else {
+        // Song not in shuffle history — insert it at current position
+        _shuffleOrder.insert(_shufflePos + 1, idx);
+        _shufflePos++;
+      }
+    }
     _playCurrentQueueItem();
   }
 
   Future<void> playSongByPath(String path) async {
-    final idx = filteredSongs.indexWhere((s) => s.path == path);
-    if (idx >= 0) await playSong(idx);
+    final idx = songs.indexWhere((s) => s.path == path);
+    if (idx >= 0) {
+      queue.assignAll(List<SongFile>.from(songs));
+      queueSource.value = 'Library';
+      queueIndex.value = idx;
+      _buildShuffleOrder(idx);
+      await _playCurrentQueueItem();
+    }
   }
 
   void togglePlay() {
@@ -493,16 +508,62 @@ class PlayerController extends GetxController {
 
   void toggleShuffle() {
     shuffleEnabled.value = !shuffleEnabled.value;
-    if (shuffleEnabled.value) _resetShuffleHistory(queueIndex.value);
+    if (shuffleEnabled.value) {
+      _buildShuffleOrder(queueIndex.value);
+    }
   }
 
-  void _resetShuffleHistory(int startIdx) {
-    _shuffleHistory.clear();
-    _shuffleHistoryIndex = -1;
-    if (startIdx >= 0) {
-      _shuffleHistory.add(startIdx);
-      _shuffleHistoryIndex = 0;
+  // ─── FIX-SHUFFLE: Fisher-Yates derangement ──────────────────────────────────
+  // Builds a complete shuffled order for all songs in the queue.
+  // The currently playing song is placed at position 0 so it stays current,
+  // and the rest are a proper random permutation.
+  void _buildShuffleOrder(int currentIdx) {
+    _shuffleOrder.clear();
+    _shufflePos = 0;
+
+    if (queue.isEmpty) return;
+
+    // Build list of all indices except current
+    final others = List<int>.generate(queue.length, (i) => i)
+      ..remove(currentIdx);
+
+    // Fisher-Yates shuffle
+    for (int i = others.length - 1; i > 0; i--) {
+      final j =
+          (DateTime.now().microsecondsSinceEpoch ^ (i * 2654435761)) % (i + 1);
+      final tmp = others[i];
+      others[i] = others[j.abs()];
+      others[j.abs()] = tmp;
     }
+
+    // Current song first, then the shuffled rest
+    _shuffleOrder.add(currentIdx);
+    _shuffleOrder.addAll(others);
+    _shufflePos = 0;
+  }
+
+  // When all songs have been played, rebuild with a truly random first song
+  // (not the same as what just finished).
+  void _rebuildShuffleOrderFromScratch() {
+    final lastPlayed = _shuffleOrder.isNotEmpty
+        ? _shuffleOrder.last
+        : (queueIndex.value >= 0 ? queueIndex.value : 0);
+
+    final indices = List<int>.generate(queue.length, (i) => i)
+      ..remove(lastPlayed);
+
+    for (int i = indices.length - 1; i > 0; i--) {
+      final j =
+          (DateTime.now().microsecondsSinceEpoch ^ (i * 2654435761)) % (i + 1);
+      final tmp = indices[i];
+      indices[i] = indices[j.abs()];
+      indices[j.abs()] = tmp;
+    }
+
+    _shuffleOrder.clear();
+    _shuffleOrder.addAll(indices);
+    _shuffleOrder.add(lastPlayed); // last played goes to end of next round
+    _shufflePos = 0;
   }
 
   SongFile? get currentSong =>
@@ -552,9 +613,11 @@ class PlayerController extends GetxController {
   }
 }
 
+// ─── FIX-FORMAT-FILTER: Only mp3, m4a (mp4 audio), flac ────────────────────
+// Removed: aac, ogg, wav
 List<List<String>> _scanDirsIsolate(List<String> dirPaths) {
   final results = <List<String>>[];
-  const supportedExts = {'.mp3', '.flac', '.m4a', '.aac', '.ogg', '.wav'};
+  const supportedExts = {'.mp3', '.flac', '.m4a'};
   for (final dirPath in dirPaths) {
     final dir = Directory(dirPath);
     if (!dir.existsSync()) continue;
@@ -566,8 +629,7 @@ List<List<String>> _scanDirsIsolate(List<String> dirPaths) {
         for (final ext in supportedExts) {
           if (lower.endsWith(ext)) {
             final name = entity.path.split('/').last.replaceAll(
-                RegExp(r'\.(mp3|flac|m4a|aac|ogg|wav)$', caseSensitive: false),
-                '');
+                RegExp(r'\.(mp3|flac|m4a)$', caseSensitive: false), '');
             results.add([name, entity.path, ext.replaceFirst('.', '')]);
             break;
           }

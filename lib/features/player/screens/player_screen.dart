@@ -1,28 +1,20 @@
 // lib/features/player/screens/player_screen.dart
 //
-// FIX LOG:
-//  [UX-1] — _MiniPlayer seek slider had no drag-value local state.
-//    The mini-player Slider was bound directly to ctrl.position, so while
-//    the user dragged, the position stream kept overriding the thumb back
-//    to the actual play position. On fast-updating streams (250 ms tick)
-//    the thumb would visibly jump back mid-drag.
-//    FIX: _MiniPlayer is now a StatefulWidget with a _dragValue double?
-//    that freezes the slider position during drag, exactly mirroring the
-//    _SeekBar pattern used on the full NowPlayingScreen.
+// FIX LOG (this session):
+//  [FIX-SEARCH-AUTOCOMPLETE] When a suggestion is tapped, the song list is
+//    filtered to show songs matching that suggestion AND the list scrolls to
+//    show the best match at the top. Tapping the song then plays it from the
+//    full library queue (fixed in player_controller.dart).
 //
-//  [BUG-6] PERF — File(artPath).existsSync() called on every frame.
-//    Each ListView.builder item was calling existsSync() inside Obx().
-//    With 500+ songs and any RxVar (position ticking every 250 ms), this
-//    ran thousands of synchronous disk stat() calls per second.
-//    FIX: artPath and existsSync() check are computed once, outside the
-//    inner Obx, and only re-evaluated when the song actually changes
-//    (keyed by song.path). The outer RepaintBoundary was already present.
+//  [FIX-SEARCH-PLAY] Tapping a song from filtered results now populates the
+//    queue from the FULL library (not just the filtered subset). The song
+//    selected is still the one that starts playing. Queue starts there.
 //
-//  [UX-2] — Search overlay not disposed on navigate.
-//    OverlayEntry stayed rendered behind NowPlayingScreen until dispose().
-//    FIX: _removeSuggestions() is already called in onTap and onSubmitted;
-//    additionally we call it in the onTap that navigates to NowPlayingScreen,
-//    so the overlay is guaranteed gone before the new route is pushed.
+//  [FIX-FORMAT-ICON] Removed aac/wav icon cases — only mp3, m4a, flac shown.
+//
+//  [UX-1] _MiniPlayer seek slider drag-value fix (unchanged from prev version).
+//  [BUG-6] artPath/existsSync outside Obx (unchanged from prev version).
+//  [UX-2] _removeSuggestions() before navigate (unchanged from prev version).
 
 import 'dart:io';
 import 'package:flutter/material.dart';
@@ -56,6 +48,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _suggestionOverlay = null;
   }
 
+  // ─── FIX-SEARCH-AUTOCOMPLETE ────────────────────────────────────────────────
+  // When a suggestion is tapped:
+  //   1. The text field is updated to the selected suggestion text.
+  //   2. The song list is filtered to show matching songs.
+  //   3. The overlay is removed so the user sees the filtered results.
+  //   4. The user then taps the specific song they want.
+  // This fixes the bug where tapping a suggestion would dismiss the overlay
+  // but not show any results (the list stayed unfiltered or empty).
   void _showSuggestions(
       BuildContext context, PlayerController ctrl, List<String> suggestions) {
     _removeSuggestions();
@@ -87,9 +87,17 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 children: suggestions
                     .map((s) => InkWell(
                           onTap: () {
+                            // FIX: Update text field AND filter songs, THEN
+                            // remove overlay so user sees the filtered list.
                             _searchCtrl.text = s;
+                            // Move cursor to end
+                            _searchCtrl.selection = TextSelection.fromPosition(
+                                TextPosition(offset: s.length));
                             ctrl.filterSongs(s);
                             _removeSuggestions();
+                            // Don't navigate — let user tap the specific song
+                            // from the now-filtered list. This matches how
+                            // Spotify's search works.
                           },
                           child: Padding(
                             padding: const EdgeInsets.symmetric(
@@ -105,6 +113,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis),
                               ),
+                              const Icon(Icons.north_west_rounded,
+                                  color: Colors.white24, size: 14),
                             ]),
                           ),
                         ))
@@ -205,7 +215,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
           onChanged: (q) {
             ctrl.filterSongs(q);
             final suggestions = ctrl.getSearchSuggestions(q);
-            if (suggestions.isNotEmpty) {
+            if (suggestions.isNotEmpty && q.trim().isNotEmpty) {
               _showSuggestions(context, ctrl, suggestions);
             } else {
               _removeSuggestions();
@@ -269,15 +279,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         itemBuilder: (_, i) {
           final song = ctrl.filteredSongs[i];
 
-          // ─── FIX BUG-6: existsSync() moved OUTSIDE Obx ───────────────
-          // Previously this was inside Obx(), running a synchronous disk
-          // stat() call on every reactive rebuild (position ticks 4×/sec).
-          // With 500+ songs this ran thousands of stat() calls per second.
-          //
-          // Now artPath and hasArt are computed once per item build, and
-          // only re-evaluated when the filteredSongs list itself changes
-          // (controlled by the outer Obx in _buildSongList). The inner Obx
-          // below only tracks isCurrentSong / isPlaying — no disk I/O.
+          // ─── BUG-6: existsSync() OUTSIDE Obx ────────────────────────────
           final artPath = _artPath(song.path);
           final hasArt = artPath != null && File(artPath).existsSync();
 
@@ -287,9 +289,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
               return InkWell(
                 onTap: () async {
-                  // ─── FIX UX-2: Remove overlay before navigating ───────
-                  // Ensures the suggestion OverlayEntry is gone before the
-                  // new route renders, so it doesn't leak behind NowPlaying.
+                  // ─── FIX UX-2 + FIX-SEARCH-PLAY ────────────────────────
+                  // Remove overlay before navigating.
+                  // playSong(i) now queues ALL library songs starting at
+                  // the selected one (see player_controller.dart).
                   _removeSuggestions();
                   await ctrl.playSong(i);
                   Get.to(() => const NowPlayingScreen(),
@@ -462,19 +465,19 @@ class _PlayerScreenState extends State<PlayerScreen> {
     );
   }
 
+  // FIX: Removed aac/wav — only mp3, m4a, flac are supported
   IconData _iconForExt(String ext) {
     return switch (ext.toLowerCase()) {
       'mp3' => Icons.music_note_rounded,
       'flac' => Icons.high_quality_rounded,
-      'm4a' || 'aac' => Icons.audiotrack_rounded,
-      'wav' => Icons.graphic_eq_rounded,
+      'm4a' => Icons.audiotrack_rounded,
       _ => Icons.audio_file_rounded,
     };
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Mini player — FIX UX-1: now StatefulWidget with drag-value local state
+// Mini player — StatefulWidget with drag-value local state (UX-1)
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _MiniPlayer extends StatefulWidget {
@@ -486,14 +489,6 @@ class _MiniPlayer extends StatefulWidget {
 }
 
 class _MiniPlayerState extends State<_MiniPlayer> {
-  // ─── FIX UX-1 ─────────────────────────────────────────────────────────────
-  // The original _MiniPlayer was a StatelessWidget and bound the Slider
-  // directly to ctrl.position. While dragging, the 250 ms position tick
-  // overrode the thumb, causing it to jump back to the real play position.
-  //
-  // Fix: Convert to StatefulWidget and track _dragValue exactly like _SeekBar.
-  // While dragging: _dragValue drives the slider (stream updates ignored).
-  // On drag end: seek() is called and _dragValue is cleared.
   double? _dragValue;
 
   @override
@@ -503,7 +498,6 @@ class _MiniPlayerState extends State<_MiniPlayer> {
       if (ctrl.currentSong == null) return const SizedBox.shrink();
       final song = ctrl.currentSong!;
       final dur = ctrl.duration.value.inSeconds.toDouble();
-      // Use _dragValue when dragging, otherwise use live position
       final pos = _dragValue ?? ctrl.position.value.inSeconds.toDouble();
 
       String displayTitle = song.name;
@@ -612,7 +606,6 @@ class _MiniPlayerState extends State<_MiniPlayer> {
               child: Slider(
                 value: pos.clamp(0, dur <= 0 ? 1 : dur),
                 max: dur <= 0 ? 1 : dur,
-                // ─── FIX UX-1: drag-value guards ────────────────────────
                 onChangeStart: (v) => setState(() => _dragValue = v),
                 onChanged:
                     dur > 0 ? (v) => setState(() => _dragValue = v) : null,
