@@ -1,23 +1,18 @@
 // lib/features/player/screens/now_playing_screen.dart
 //
 // FIX LOG (this session):
-//  [FIX-ART-SQUARE]   Album art container now uses AspectRatio(1,1) so it is
-//    always a perfect square regardless of screen size. No more stretching.
-//
-//  [FIX-QUEUE-SCROLL] Queue tab auto-scrolls to the currently playing song
-//    so you can immediately see what's playing and what's next.
-//
-//  [FEAT-LYRICS]      Spotify-style lyrics view: swipe the album art left or
-//    tap the "Lyrics" button to slide into a karaoke-style scrolling lyrics
-//    panel. Lyrics are loaded from a .lrc sidecar file next to the audio file
-//    (e.g. "song.mp3" → "song.lrc"). Falls back to a plain text .txt file.
-//    Active line is highlighted and auto-scrolls. The panel transitions in
-//    with the same slide animation Spotify uses (PageView).
-//    Lyrics can be added/edited via the edit metadata sheet.
+//  [FIX-ART-SQUARE]   Album art container uses AspectRatio(1) — always square.
+//  [FIX-QUEUE-SCROLL] Queue tab auto-scrolls to currently playing song.
+//  [FEAT-LYRICS]      Spotify-style lyrics: PageView swipe or Lyrics button.
+//                     Auto-fetches synced .lrc from lrclib.net when no local
+//                     file exists. Saves to disk so it works offline after
+//                     first fetch. Karaoke highlighting + auto-scroll.
 
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
+import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import '../../../core/theme/app_theme.dart';
@@ -54,6 +49,7 @@ List<LrcLine> parseLrc(String content) {
   return lines;
 }
 
+/// Returns existing local lyrics path (.lrc preferred over .txt), or null.
 String? _lrcPathFor(String audioPath) {
   final base = audioPath.replaceAll(
       RegExp(r'\.(mp3|flac|m4a)$', caseSensitive: false), '');
@@ -62,6 +58,84 @@ String? _lrcPathFor(String audioPath) {
   final txt = '$base.txt';
   if (File(txt).existsSync()) return txt;
   return null;
+}
+
+/// Returns the path where a fetched .lrc should be saved (next to the audio).
+String _lrcSavePath(String audioPath) {
+  final base = audioPath.replaceAll(
+      RegExp(r'\.(mp3|flac|m4a)$', caseSensitive: false), '');
+  return '$base.lrc';
+}
+
+// ─── lrclib.net Auto-Fetch ───────────────────────────────────────────────────
+// Queries lrclib.net (free, no API key) for synced lyrics.
+// Search priority:
+//   1. title + artist (if artist is set in metadata)
+//   2. title only (fallback)
+// Returns the raw LRC string on success, null on failure.
+Future<String?> _fetchLrcFromNet({
+  required String title,
+  String? artist,
+  int? durationSeconds,
+}) async {
+  const base = 'https://lrclib.net/api';
+
+  Future<String?> tryQuery(Uri uri) async {
+    try {
+      final res = await http.get(uri, headers: {
+        'User-Agent': 'Resonance/1.0'
+      }).timeout(const Duration(seconds: 8));
+      if (res.statusCode != 200) return null;
+      final json = jsonDecode(res.body);
+
+      // /api/get returns a single object; /api/search returns a list
+      if (json is List) {
+        if (json.isEmpty) return null;
+        // Pick best match: prefer results with syncedLyrics
+        final withSynced = json
+            .where((e) =>
+                e['syncedLyrics'] != null &&
+                (e['syncedLyrics'] as String).isNotEmpty)
+            .toList();
+        final pick = withSynced.isNotEmpty ? withSynced.first : json.first;
+        final synced = pick['syncedLyrics'] as String?;
+        final plain = pick['plainLyrics'] as String?;
+        return (synced != null && synced.isNotEmpty) ? synced : plain;
+      } else if (json is Map) {
+        final synced = json['syncedLyrics'] as String?;
+        final plain = json['plainLyrics'] as String?;
+        return (synced != null && synced.isNotEmpty) ? synced : plain;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  // Try with artist + duration first (most precise)
+  if (artist != null && artist != 'Unknown Artist' && durationSeconds != null) {
+    final uri = Uri.parse('$base/get').replace(queryParameters: {
+      'track_name': title,
+      'artist_name': artist,
+      'duration': '$durationSeconds',
+    });
+    final result = await tryQuery(uri);
+    if (result != null) return result;
+  }
+
+  // Try search with artist
+  if (artist != null && artist != 'Unknown Artist') {
+    final uri = Uri.parse('$base/search').replace(queryParameters: {
+      'track_name': title,
+      'artist_name': artist,
+    });
+    final result = await tryQuery(uri);
+    if (result != null) return result;
+  }
+
+  // Fallback: title only
+  final uri = Uri.parse('$base/search').replace(queryParameters: {
+    'track_name': title,
+  });
+  return tryQuery(uri);
 }
 
 // ─── Main Screen ────────────────────────────────────────────────────────────
@@ -409,8 +483,13 @@ class _LyricsPage extends StatefulWidget {
 class _LyricsPageState extends State<_LyricsPage> {
   List<LrcLine> _lines = [];
   String? _plainText;
-  bool _loaded = false;
-  String? _loadedFor;
+
+  // State machine for loading
+  // idle → loading → loaded | error | notFound
+  _LyricsState _state = _LyricsState.idle;
+  String? _loadedFor; // audio path that was loaded
+  bool _fetching = false; // true while network request is in flight
+
   final ScrollController _scrollCtrl = ScrollController();
 
   @override
@@ -419,29 +498,115 @@ class _LyricsPageState extends State<_LyricsPage> {
     super.dispose();
   }
 
-  void _loadLyrics(String audioPath) {
-    if (_loadedFor == audioPath) return;
-    _loadedFor = audioPath;
+  // Called when the song changes or when the user taps "Try again"
+  Future<void> _load(SongFile song) async {
+    // Don't reload if we already have lyrics for this exact file
+    if (_loadedFor == song.path && _state == _LyricsState.loaded) return;
+    // Don't double-fetch
+    if (_loadedFor == song.path && _fetching) return;
+
+    _loadedFor = song.path;
     _lines = [];
     _plainText = null;
+    _fetching = false;
 
-    final lrcPath = _lrcPathFor(audioPath);
-    if (lrcPath == null) {
-      setState(() => _loaded = true);
+    // ── Step 1: Check for a local .lrc / .txt file ───────────────────────
+    final localPath = _lrcPathFor(song.path);
+    if (localPath != null) {
+      _parseAndSetLocal(localPath);
       return;
     }
 
-    try {
-      final content = File(lrcPath).readAsStringSync();
-      if (lrcPath.endsWith('.lrc')) {
-        _lines = parseLrc(content);
-        if (_lines.isEmpty) _plainText = content.trim();
-      } else {
-        _plainText = content.trim();
-      }
-    } catch (_) {}
+    // ── Step 2: No local file → fetch from lrclib.net ────────────────────
+    if (!mounted) return;
+    setState(() {
+      _state = _LyricsState.fetching;
+      _fetching = true;
+    });
 
-    setState(() => _loaded = true);
+    try {
+      // Get title and artist from metadata if available
+      String title = song.name;
+      String? artist;
+      int? durationSecs;
+      try {
+        final meta = Get.find<MetadataService>().get(song.path);
+        if (meta?.customTitle?.isNotEmpty == true) title = meta!.customTitle!;
+        if (meta?.customArtist?.isNotEmpty == true)
+          artist = meta!.customArtist!;
+      } catch (_) {}
+      try {
+        final ctrl = Get.find<PlayerController>();
+        final dur = ctrl.duration.value;
+        if (dur.inSeconds > 0) durationSecs = dur.inSeconds;
+      } catch (_) {}
+
+      final lrcContent = await _fetchLrcFromNet(
+        title: title,
+        artist: artist,
+        durationSeconds: durationSecs,
+      );
+
+      if (!mounted) return;
+
+      if (lrcContent == null || lrcContent.trim().isEmpty) {
+        setState(() {
+          _state = _LyricsState.notFound;
+          _fetching = false;
+        });
+        return;
+      }
+
+      // Save to disk next to the audio so it works offline next time
+      final savePath = _lrcSavePath(song.path);
+      try {
+        await File(savePath).writeAsString(lrcContent);
+      } catch (_) {
+        // Non-fatal: still display lyrics in memory
+      }
+
+      // Parse and display
+      final parsed = parseLrc(lrcContent);
+      setState(() {
+        _fetching = false;
+        if (parsed.isNotEmpty) {
+          _lines = parsed;
+          _state = _LyricsState.loaded;
+        } else {
+          // lrclib returned plain text (no timestamps)
+          _plainText = lrcContent.trim();
+          _state = _LyricsState.loaded;
+        }
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _state = _LyricsState.error;
+        _fetching = false;
+      });
+    }
+  }
+
+  void _parseAndSetLocal(String localPath) {
+    try {
+      final content = File(localPath).readAsStringSync();
+      final parsed =
+          localPath.endsWith('.lrc') ? parseLrc(content) : <LrcLine>[];
+      setState(() {
+        if (parsed.isNotEmpty) {
+          _lines = parsed;
+        } else {
+          _plainText = content.trim();
+        }
+        _state = _LyricsState.loaded;
+        _fetching = false;
+      });
+    } catch (_) {
+      setState(() {
+        _state = _LyricsState.error;
+        _fetching = false;
+      });
+    }
   }
 
   int _activeIndex(Duration pos) {
@@ -458,7 +623,6 @@ class _LyricsPageState extends State<_LyricsPage> {
 
   void _autoScroll(int activeIdx) {
     if (!_scrollCtrl.hasClients || activeIdx < 0) return;
-    // Each line is roughly 56px tall; scroll to centre it
     final target =
         (activeIdx * 56.0) - (_scrollCtrl.position.viewportDimension / 2) + 28;
     _scrollCtrl.animateTo(
@@ -472,37 +636,109 @@ class _LyricsPageState extends State<_LyricsPage> {
   Widget build(BuildContext context) {
     return Obx(() {
       final song = widget.ctrl.currentSong;
-      if (song != null) _loadLyrics(song.path);
-
-      if (!_loaded) {
+      if (song == null) {
         return const Center(
-            child: CircularProgressIndicator(color: AppTheme.primary));
+            child: Text('Nothing playing',
+                style: TextStyle(color: Colors.white38)));
       }
 
-      if (_lines.isEmpty && (_plainText == null || _plainText!.isEmpty)) {
+      // Trigger load when song changes (side-effect inside Obx is safe here
+      // because _load is idempotent for the same song path)
+      if (_loadedFor != song.path) {
+        // Schedule after build so setState is not called during build
+        WidgetsBinding.instance.addPostFrameCallback((_) => _load(song));
+      }
+
+      // ── Fetching ────────────────────────────────────────────────────────
+      if (_state == _LyricsState.idle || _state == _LyricsState.fetching) {
         return Center(
           child: Column(mainAxisSize: MainAxisSize.min, children: [
-            const Icon(Icons.lyrics_rounded, color: Colors.white12, size: 64),
-            const SizedBox(height: 16),
-            const Text('No lyrics found',
-                style: TextStyle(color: Colors.white38, fontSize: 16)),
-            const SizedBox(height: 8),
+            const CircularProgressIndicator(color: AppTheme.primary),
+            const SizedBox(height: 20),
             Text(
-              'Add a .lrc or .txt file with the same\nname as your song file',
-              style: const TextStyle(color: Colors.white24, fontSize: 13),
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 16),
-            TextButton(
-              onPressed: () => _showLrcHelp(context),
-              child: const Text('How to add lyrics',
-                  style: TextStyle(color: AppTheme.primary)),
+              _state == _LyricsState.fetching
+                  ? 'Finding lyrics...'
+                  : 'Loading...',
+              style: const TextStyle(color: Colors.white38, fontSize: 14),
             ),
           ]),
         );
       }
 
-      // Plain text lyrics
+      // ── Not found ────────────────────────────────────────────────────────
+      if (_state == _LyricsState.notFound) {
+        return Center(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 32),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              const Icon(Icons.lyrics_rounded, color: Colors.white12, size: 64),
+              const SizedBox(height: 16),
+              const Text('No lyrics found',
+                  style: TextStyle(
+                      color: Colors.white38,
+                      fontSize: 18,
+                      fontWeight: FontWeight.w600)),
+              const SizedBox(height: 10),
+              Text(
+                'Couldn\'t find lyrics for this song online.\n'
+                'You can add a .lrc or .txt file with the same name as your audio file.',
+                style: const TextStyle(
+                    color: Colors.white24, fontSize: 13, height: 1.6),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 20),
+              OutlinedButton.icon(
+                onPressed: () {
+                  setState(() {
+                    _state = _LyricsState.idle;
+                    _loadedFor = null;
+                  });
+                  _load(song);
+                },
+                icon: const Icon(Icons.refresh_rounded,
+                    size: 16, color: AppTheme.primary),
+                label: const Text('Try again',
+                    style: TextStyle(color: AppTheme.primary)),
+                style: OutlinedButton.styleFrom(
+                    side: const BorderSide(color: AppTheme.primary)),
+              ),
+            ]),
+          ),
+        );
+      }
+
+      // ── Error ────────────────────────────────────────────────────────────
+      if (_state == _LyricsState.error) {
+        return Center(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const Icon(Icons.wifi_off_rounded, color: Colors.white24, size: 56),
+            const SizedBox(height: 16),
+            const Text('Couldn\'t load lyrics',
+                style: TextStyle(color: Colors.white38, fontSize: 16)),
+            const SizedBox(height: 8),
+            const Text('Check your connection and try again.',
+                style: TextStyle(color: Colors.white24, fontSize: 13)),
+            const SizedBox(height: 20),
+            OutlinedButton.icon(
+              onPressed: () {
+                setState(() {
+                  _state = _LyricsState.idle;
+                  _loadedFor = null;
+                });
+                _load(song);
+              },
+              icon: const Icon(Icons.refresh_rounded,
+                  size: 16, color: AppTheme.primary),
+              label: const Text('Retry',
+                  style: TextStyle(color: AppTheme.primary)),
+              style: OutlinedButton.styleFrom(
+                  side: const BorderSide(color: AppTheme.primary)),
+            ),
+          ]),
+        );
+      }
+
+      // ── Loaded: plain text ───────────────────────────────────────────────
       if (_lines.isEmpty && _plainText != null) {
         return SingleChildScrollView(
           padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 24),
@@ -512,11 +748,10 @@ class _LyricsPageState extends State<_LyricsPage> {
         );
       }
 
-      // LRC karaoke lyrics
+      // ── Loaded: synced LRC karaoke ────────────────────────────────────────
       final pos = widget.ctrl.position.value;
       final activeIdx = _activeIndex(pos);
 
-      // Auto-scroll side effect
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _autoScroll(activeIdx);
       });
@@ -532,10 +767,7 @@ class _LyricsPageState extends State<_LyricsPage> {
           final isActive = i == activeIdx;
           final isPast = i < activeIdx;
           return GestureDetector(
-            onTap: () {
-              // Tap a lyric line to seek to that position
-              widget.ctrl.seek(_lines[i].time.inSeconds.toDouble());
-            },
+            onTap: () => widget.ctrl.seek(_lines[i].time.inSeconds.toDouble()),
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 200),
               padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
@@ -559,35 +791,9 @@ class _LyricsPageState extends State<_LyricsPage> {
       );
     });
   }
-
-  void _showLrcHelp(BuildContext context) {
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        backgroundColor: AppTheme.surface,
-        title: const Text('Adding Lyrics',
-            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-        content: const Text(
-          'Place a lyrics file next to your audio file with the same name:\n\n'
-          '• "My Song.mp3" → "My Song.lrc" (karaoke, synced)\n'
-          '• "My Song.mp3" → "My Song.txt" (plain text)\n\n'
-          'LRC format example:\n'
-          '[00:12.50]First line of lyrics\n'
-          '[00:17.20]Second line of lyrics\n\n'
-          'You can download .lrc files from sites like lrclib.net',
-          style: TextStyle(color: Colors.white70, fontSize: 13, height: 1.6),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Get.back(),
-            child:
-                const Text('Got it', style: TextStyle(color: AppTheme.primary)),
-          ),
-        ],
-      ),
-    );
-  }
 }
+
+enum _LyricsState { idle, fetching, loaded, notFound, error }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Album art widget — FIX-ART-SQUARE: outer AspectRatio ensures perfect square
