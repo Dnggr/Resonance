@@ -6,6 +6,10 @@
 //    twice in a row (copy-paste leftover). Every finished download showed
 //    two system notifications.
 //    FIX: Removed the duplicate call. showDownloadDone() is now called once.
+//
+//  [FIX-AUTO-METADATA] After download completes, writes title, artist (YouTube
+//    channel name), and album art thumbnail to the Hive song_metadata box so
+//    the player shows them immediately — no manual editing required.
 
 import 'dart:io';
 import 'package:flutter/material.dart';
@@ -15,6 +19,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 import '../../../core/models/download_record.dart';
+import '../../../core/models/song_metadata.dart';
 import '../../../core/utils/media_scanner.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/services/notification_service.dart';
@@ -322,9 +327,6 @@ class DownloaderService extends GetxController {
       downloadedAt: DateTime.now(),
     );
 
-    // ─── FIX BUG-3: showDownloadDone called only ONCE ────────────────────
-    // Previously it was called twice in a row (copy-paste leftover).
-    // Every finished download showed two system notifications.
     await NotificationService.showDownloadDone(
       id: notifId,
       title: task.title,
@@ -334,6 +336,58 @@ class DownloaderService extends GetxController {
     await _historyBox.put(task.videoId + task.formatLabel, record);
     downloadHistory.insert(0, record);
     activeDownloads.remove(task);
+
+    // [FIX-AUTO-METADATA] Write title, artist, and thumbnail to Hive so
+    // the player shows them immediately without manual editing.
+    await _writeDownloadMetadata(task, filePath);
+  }
+
+  /// Downloads the YouTube thumbnail and writes a SongMetadata entry to Hive.
+  /// Non-fatal — the song still plays correctly if this fails.
+  Future<void> _writeDownloadMetadata(
+      DownloadTask task, String filePath) async {
+    try {
+      String? artPath;
+
+      // Download thumbnail as a local JPEG next to the audio file
+      if (task.thumbnail.isNotEmpty) {
+        try {
+          final http = await HttpClient().getUrl(Uri.parse(task.thumbnail));
+          final response = await http.close();
+          if (response.statusCode == 200) {
+            final thumbPath =
+                filePath.replaceAll(RegExp(r'\.(mp3|flac|m4a)$'), '_thumb.jpg');
+            final bytes = <int>[];
+            await for (final chunk in response) {
+              bytes.addAll(chunk);
+            }
+            await File(thumbPath).writeAsBytes(bytes);
+            artPath = thumbPath;
+          }
+        } catch (_) {
+          // Thumbnail download failed — continue without art
+        }
+      }
+
+      // Write SongMetadata to Hive (same box + key scheme as MetadataService)
+      final box = Hive.box<SongMetadata>('song_metadata');
+      final existing = box.get(filePath);
+
+      // Only write if no user-edited metadata exists yet
+      if (existing == null) {
+        final meta = SongMetadata(
+          filePath: filePath,
+          customTitle: task.title.isNotEmpty ? task.title : null,
+          customArtist: task.author.isNotEmpty ? task.author : null,
+          customAlbum: 'YouTube Download',
+          artImagePath: artPath,
+        );
+        await box.put(filePath, meta);
+        debugPrint('Auto-metadata written for: ${task.title}');
+      }
+    } catch (e) {
+      debugPrint('Auto-metadata write failed (non-fatal): $e');
+    }
   }
 
   void pauseTask(DownloadTask task) {

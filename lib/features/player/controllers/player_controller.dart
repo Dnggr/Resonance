@@ -18,6 +18,9 @@
 //
 //  [FIX-FORMAT-FILTER] _scanDirsIsolate only returns mp3, mp4/m4a, flac.
 //    aac, ogg, wav removed.
+//
+//  [FIX-SEARCH-DEBOUNCE] filterSongs() is now debounced (300ms) so the full
+//    list rebuild only runs after the user stops typing, not on every keystroke.
 
 import 'dart:async';
 import 'dart:io';
@@ -88,6 +91,7 @@ class PlayerController extends GetxController {
   DateTime _lastPositionUpdate = DateTime.now();
   StreamSubscription<ProcessingState>? _eqInitSub;
   Timer? _autoRefreshTimer;
+  Timer? _searchDebounce;
 
   MetadataService? get _meta {
     try {
@@ -153,15 +157,22 @@ class PlayerController extends GetxController {
     }
   }
 
+  // [FIX-SEARCH-DEBOUNCE] Only runs the filter after 300ms pause in typing.
   void filterSongs(String query) {
     searchQuery.value = query;
+    _searchDebounce?.cancel();
+
     if (query.trim().isEmpty) {
       filteredSongs.assignAll(songs);
-    } else {
+      return;
+    }
+
+    _searchDebounce = Timer(const Duration(milliseconds: 300), () {
       final q = query.toLowerCase();
       filteredSongs.assignAll(
-          songs.where((s) => s.name.toLowerCase().contains(q)).toList());
-    }
+        songs.where((s) => s.name.toLowerCase().contains(q)).toList(),
+      );
+    });
   }
 
   List<String> getSearchSuggestions(String query) {
@@ -608,6 +619,7 @@ class PlayerController extends GetxController {
   void onClose() {
     _eqInitSub?.cancel();
     _autoRefreshTimer?.cancel();
+    _searchDebounce?.cancel();
     if (_handler == null) player.dispose();
     super.onClose();
   }

@@ -7,10 +7,13 @@
 //                     Auto-fetches synced .lrc from lrclib.net when no local
 //                     file exists. Saves to disk so it works offline after
 //                     first fetch. Karaoke highlighting + auto-scroll.
+//  [FIX-LYRICS-FALLBACK] Multi-API waterfall: asset cache → lrclib.net →
+//                     lyrics.ovh. Better coverage for Tagalog/OPM songs.
 
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:get/get.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
@@ -67,13 +70,52 @@ String _lrcSavePath(String audioPath) {
   return '$base.lrc';
 }
 
-// ─── lrclib.net Auto-Fetch ───────────────────────────────────────────────────
-// Queries lrclib.net (free, no API key) for synced lyrics.
-// Search priority:
-//   1. title + artist (if artist is set in metadata)
-//   2. title only (fallback)
-// Returns the raw LRC string on success, null on failure.
+// ─── Lyrics Fetch: asset cache → lrclib.net → lyrics.ovh ────────────────────
+// Waterfall:
+//   1. assets/lyrics/<title>.lrc  (instant, offline, bundled in app)
+//   2. lrclib.net                 (synced LRC preferred, plain fallback)
+//   3. lyrics.ovh                 (plain text, better for Tagalog/OPM)
 Future<String?> _fetchLrcFromNet({
+  required String title,
+  String? artist,
+  int? durationSeconds,
+}) async {
+  // Step 0: bundled asset cache (instant, offline)
+  final assetResult = await _loadFromAssets(title);
+  if (assetResult != null) return assetResult;
+
+  // Step 1+2: lrclib.net (synced preferred, plain fallback)
+  final lrclibResult = await _fetchFromLrclib(
+    title: title,
+    artist: artist,
+    durationSeconds: durationSeconds,
+  );
+  if (lrclibResult != null) return lrclibResult;
+
+  // Step 3: lyrics.ovh (plain text, better for Tagalog/OPM)
+  return _fetchFromLyricsOvh(title: title, artist: artist);
+}
+
+/// Check bundled assets/lyrics/<title>.lrc before any network call.
+/// To use: create assets/lyrics/ folder, add to pubspec.yaml assets:,
+/// and place files like "Pasilyo.lrc", "Alipin.lrc" etc. there.
+Future<String?> _loadFromAssets(String title) async {
+  final candidates = [
+    'assets/lyrics/$title.lrc',
+    'assets/lyrics/$title.txt',
+    'assets/lyrics/${title.replaceAll(' ', '_')}.lrc',
+  ];
+  for (final assetPath in candidates) {
+    try {
+      final content = await rootBundle.loadString(assetPath);
+      if (content.trim().isNotEmpty) return content;
+    } catch (_) {}
+  }
+  return null;
+}
+
+/// lrclib.net — synced LRC preferred, plain text fallback.
+Future<String?> _fetchFromLrclib({
   required String title,
   String? artist,
   int? durationSeconds,
@@ -88,10 +130,8 @@ Future<String?> _fetchLrcFromNet({
       if (res.statusCode != 200) return null;
       final json = jsonDecode(res.body);
 
-      // /api/get returns a single object; /api/search returns a list
       if (json is List) {
         if (json.isEmpty) return null;
-        // Pick best match: prefer results with syncedLyrics
         final withSynced = json
             .where((e) =>
                 e['syncedLyrics'] != null &&
@@ -110,32 +150,60 @@ Future<String?> _fetchLrcFromNet({
     return null;
   }
 
-  // Try with artist + duration first (most precise)
+  // Most precise: title + artist + duration
   if (artist != null && artist != 'Unknown Artist' && durationSeconds != null) {
-    final uri = Uri.parse('$base/get').replace(queryParameters: {
+    final r = await tryQuery(Uri.parse('$base/get').replace(queryParameters: {
       'track_name': title,
       'artist_name': artist,
       'duration': '$durationSeconds',
-    });
-    final result = await tryQuery(uri);
-    if (result != null) return result;
+    }));
+    if (r != null) return r;
   }
 
-  // Try search with artist
+  // Title + artist search
   if (artist != null && artist != 'Unknown Artist') {
-    final uri = Uri.parse('$base/search').replace(queryParameters: {
+    final r =
+        await tryQuery(Uri.parse('$base/search').replace(queryParameters: {
       'track_name': title,
       'artist_name': artist,
-    });
-    final result = await tryQuery(uri);
-    if (result != null) return result;
+    }));
+    if (r != null) return r;
   }
 
-  // Fallback: title only
-  final uri = Uri.parse('$base/search').replace(queryParameters: {
-    'track_name': title,
-  });
-  return tryQuery(uri);
+  // Title only fallback
+  return tryQuery(Uri.parse('$base/search')
+      .replace(queryParameters: {'track_name': title}));
+}
+
+/// lyrics.ovh — plain text, better coverage for Tagalog/OPM content.
+Future<String?> _fetchFromLyricsOvh({
+  required String title,
+  String? artist,
+}) async {
+  final effectiveArtist =
+      (artist != null && artist != 'Unknown Artist') ? artist : null;
+  if (effectiveArtist == null) return null;
+
+  try {
+    final uri = Uri.parse(
+        'https://api.lyrics.ovh/v1/${Uri.encodeComponent(effectiveArtist)}/${Uri.encodeComponent(title)}');
+    final res = await http.get(uri).timeout(const Duration(seconds: 8));
+    if (res.statusCode != 200) return null;
+    final body = res.body;
+    final start = body.indexOf('"lyrics"');
+    if (start < 0) return null;
+    final q1 = body.indexOf('"', start + 9);
+    final q2 = body.lastIndexOf('"');
+    if (q1 < 0 || q2 <= q1) return null;
+    final raw = body
+        .substring(q1 + 1, q2)
+        .replaceAll('\\n', '\n')
+        .replaceAll('\\r', '')
+        .trim();
+    return raw.isNotEmpty ? raw : null;
+  } catch (_) {
+    return null;
+  }
 }
 
 // ─── Main Screen ────────────────────────────────────────────────────────────
@@ -517,7 +585,7 @@ class _LyricsPageState extends State<_LyricsPage> {
       return;
     }
 
-    // ── Step 2: No local file → fetch from lrclib.net ────────────────────
+    // ── Step 2: No local file → fetch from network ────────────────────
     if (!mounted) return;
     setState(() {
       _state = _LyricsState.fetching;
@@ -573,7 +641,7 @@ class _LyricsPageState extends State<_LyricsPage> {
           _lines = parsed;
           _state = _LyricsState.loaded;
         } else {
-          // lrclib returned plain text (no timestamps)
+          // returned plain text (no timestamps)
           _plainText = lrcContent.trim();
           _state = _LyricsState.loaded;
         }
