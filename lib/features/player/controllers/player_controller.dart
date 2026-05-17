@@ -1,26 +1,10 @@
 // lib/features/player/controllers/player_controller.dart
 //
-// FIX LOG (this session):
-//  [FIX-SHUFFLE] Shuffle now uses a proper Fisher-Yates derangement so ALL
-//    songs play exactly once before repeating. Old code used millisecondsSinceEpoch
-//    % queue.length which is NOT random — it consistently skips ~half the songs.
-//    New approach: on shuffle-on or new-song-play, pre-generate a full shuffled
-//    order (excluding the currently-playing song first, then appending it at
-//    position 0). _shuffleOrder holds the full order; _shufflePos is the cursor.
-//
-//  [FIX-QUEUE-SEARCH] playSong() now always populates the queue from the full
-//    songs list (not filteredSongs), starting at the correct index within songs.
-//    When a search is active and the user taps a result, the queue is ALL songs
-//    but starts at the tapped song. The queueSource label is updated accordingly.
-//
-//  [FIX-QUEUE-SCROLL] NowPlayingScreen Queue tab auto-scrolls to queueIndex.
-//    (See now_playing_screen.dart — _QueueTab uses a ScrollController.)
-//
-//  [FIX-FORMAT-FILTER] _scanDirsIsolate only returns mp3, mp4/m4a, flac.
-//    aac, ogg, wav removed.
-//
-//  [FIX-SEARCH-DEBOUNCE] filterSongs() is now debounced (300ms) so the full
-//    list rebuild only runs after the user stops typing, not on every keystroke.
+// CHANGE THIS SESSION:
+//  [FIX-SHUFFLE-GETTERS] Added public getters `shuffleOrder` and `shufflePos`
+//    so _QueueTab in now_playing_screen.dart can read the actual shuffle
+//    sequence to display the queue in playback order instead of alphabetical.
+//    These are read-only views of the private lists — no logic changed.
 
 import 'dart:async';
 import 'dart:io';
@@ -80,13 +64,13 @@ class PlayerController extends GetxController {
   Rx<LoopMode> loopMode = LoopMode.none.obs;
   RxBool shuffleEnabled = false.obs;
 
-  // ─── FIX-SHUFFLE: Full derangement-based shuffle ────────────────────────────
-  // _shuffleOrder: pre-generated permutation of all queue indices.
-  //   Index 0 is always the song that was playing when shuffle was activated.
-  //   The remaining indices are a Fisher-Yates shuffle of all other songs.
-  // _shufflePos: current position within _shuffleOrder.
   final List<int> _shuffleOrder = [];
   int _shufflePos = 0;
+
+  // ── FIX-SHUFFLE-GETTERS: read-only access for queue display ──────────────
+  // _QueueTab reads these to render the queue in actual shuffle playback order.
+  List<int> get shuffleOrder => List.unmodifiable(_shuffleOrder);
+  int get shufflePos => _shufflePos;
 
   DateTime _lastPositionUpdate = DateTime.now();
   StreamSubscription<ProcessingState>? _eqInitSub;
@@ -157,7 +141,6 @@ class PlayerController extends GetxController {
     }
   }
 
-  // [FIX-SEARCH-DEBOUNCE] Only runs the filter after 300ms pause in typing.
   void filterSongs(String query) {
     searchQuery.value = query;
     _searchDebounce?.cancel();
@@ -206,16 +189,10 @@ class PlayerController extends GetxController {
     }
   }
 
-  // ─── FIX-QUEUE-SEARCH ───────────────────────────────────────────────────────
-  // When a user taps a song in the library (whether filtered or not), the queue
-  // is populated from the FULL songs list. The index passed in is the index
-  // within filteredSongs; we map it back to the index in songs so the queue
-  // starts at the correct song and contains every song in the library.
   Future<void> playSong(int indexInFiltered) async {
     if (indexInFiltered < 0 || indexInFiltered >= filteredSongs.length) return;
     final tappedSong = filteredSongs[indexInFiltered];
 
-    // Always queue ALL songs, find starting index by path
     final allSongs = List<SongFile>.from(songs);
     final startIdx = allSongs.indexWhere((s) => s.path == tappedSong.path);
     final safeStart = startIdx >= 0 ? startIdx : 0;
@@ -261,7 +238,6 @@ class PlayerController extends GetxController {
     if (currentPath != null) {
       final newIdx = newQueue.indexWhere((s) => s.path == currentPath);
       queueIndex.value = newIdx;
-      // Rebuild shuffle order preserving current position
       if (shuffleEnabled.value) _buildShuffleOrder(newIdx);
     }
     Get.snackbar('Up Next', '"${song.name}" added to play next',
@@ -408,11 +384,9 @@ class PlayerController extends GetxController {
         break;
       case LoopMode.none:
         if (shuffleEnabled.value) {
-          // In shuffle mode, always advance unless we've played every song
           if (_shufflePos < _shuffleOrder.length - 1) {
             playNext();
           }
-          // If we've played all songs, stop (no loop)
         } else {
           if (queueIndex.value < queue.length - 1) playNext();
         }
@@ -420,19 +394,15 @@ class PlayerController extends GetxController {
     }
   }
 
-  // ─── FIX-SHUFFLE: playNext / playPrev use _shuffleOrder ─────────────────────
   void playNext() {
     if (queue.isEmpty) return;
 
     if (shuffleEnabled.value) {
       if (_shuffleOrder.isEmpty) _buildShuffleOrder(queueIndex.value);
 
-      // Move forward in the pre-generated shuffle order
       if (_shufflePos < _shuffleOrder.length - 1) {
         _shufflePos++;
       } else {
-        // All songs played — rebuild a new shuffle order starting fresh
-        // (the first song of the new round will be random, not the same as last)
         _rebuildShuffleOrderFromScratch();
         _shufflePos = 0;
       }
@@ -460,7 +430,6 @@ class PlayerController extends GetxController {
         _shufflePos--;
         queueIndex.value = _shuffleOrder[_shufflePos];
       } else {
-        // Already at start — restart current
         player.seek(Duration.zero);
         return;
       }
@@ -474,13 +443,11 @@ class PlayerController extends GetxController {
   void playByQueueIndex(int idx) {
     if (idx < 0 || idx >= queue.length) return;
     queueIndex.value = idx;
-    // Update shuffle position to match manually selected song
     if (shuffleEnabled.value) {
       final posInOrder = _shuffleOrder.indexOf(idx);
       if (posInOrder >= 0) {
         _shufflePos = posInOrder;
       } else {
-        // Song not in shuffle history — insert it at current position
         _shuffleOrder.insert(_shufflePos + 1, idx);
         _shufflePos++;
       }
@@ -524,21 +491,15 @@ class PlayerController extends GetxController {
     }
   }
 
-  // ─── FIX-SHUFFLE: Fisher-Yates derangement ──────────────────────────────────
-  // Builds a complete shuffled order for all songs in the queue.
-  // The currently playing song is placed at position 0 so it stays current,
-  // and the rest are a proper random permutation.
   void _buildShuffleOrder(int currentIdx) {
     _shuffleOrder.clear();
     _shufflePos = 0;
 
     if (queue.isEmpty) return;
 
-    // Build list of all indices except current
     final others = List<int>.generate(queue.length, (i) => i)
       ..remove(currentIdx);
 
-    // Fisher-Yates shuffle
     for (int i = others.length - 1; i > 0; i--) {
       final j =
           (DateTime.now().microsecondsSinceEpoch ^ (i * 2654435761)) % (i + 1);
@@ -547,14 +508,11 @@ class PlayerController extends GetxController {
       others[j.abs()] = tmp;
     }
 
-    // Current song first, then the shuffled rest
     _shuffleOrder.add(currentIdx);
     _shuffleOrder.addAll(others);
     _shufflePos = 0;
   }
 
-  // When all songs have been played, rebuild with a truly random first song
-  // (not the same as what just finished).
   void _rebuildShuffleOrderFromScratch() {
     final lastPlayed = _shuffleOrder.isNotEmpty
         ? _shuffleOrder.last
@@ -573,7 +531,7 @@ class PlayerController extends GetxController {
 
     _shuffleOrder.clear();
     _shuffleOrder.addAll(indices);
-    _shuffleOrder.add(lastPlayed); // last played goes to end of next round
+    _shuffleOrder.add(lastPlayed);
     _shufflePos = 0;
   }
 
@@ -625,8 +583,8 @@ class PlayerController extends GetxController {
   }
 }
 
-// ─── FIX-FORMAT-FILTER: Only mp3, m4a (mp4 audio), flac ────────────────────
-// Removed: aac, ogg, wav
+// ─── Format filter: mp3, m4a, flac only ─────────────────────────────────────
+
 List<List<String>> _scanDirsIsolate(List<String> dirPaths) {
   final results = <List<String>>[];
   const supportedExts = {'.mp3', '.flac', '.m4a'};

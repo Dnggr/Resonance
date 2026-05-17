@@ -1,15 +1,14 @@
 // lib/features/downloader/services/downloader_service.dart
 //
-// FIX LOG:
-//  [BUG-3] LOGIC — Download complete notification fired twice.
-//    In _completeTask(), NotificationService.showDownloadDone() was called
-//    twice in a row (copy-paste leftover). Every finished download showed
-//    two system notifications.
-//    FIX: Removed the duplicate call. showDownloadDone() is now called once.
-//
-//  [FIX-AUTO-METADATA] After download completes, writes title, artist (YouTube
-//    channel name), and album art thumbnail to the Hive song_metadata box so
-//    the player shows them immediately — no manual editing required.
+// FIXES THIS SESSION:
+//  [FIX-TITLE-CLEAN] _cleanYouTubeTitle() strips "(Official Audio)", "(Official
+//    Video)", "(Lyric Video)", "(Official Music Video)", feat. parenthetical
+//    noise, trailing dashes, and extra spaces from YouTube titles before writing
+//    to SongMetadata. e.g. "Joji - LOVE YOU LESS (Official Audio)" becomes
+//    "LOVE YOU LESS" with artist "Joji".
+//  [FIX-ARTIST-SPLIT] If the YouTube title contains " - ", the left part is
+//    used as the artist and the right as the title (overrides channel name which
+//    is always the uploader, not the actual artist).
 
 import 'dart:io';
 import 'package:flutter/material.dart';
@@ -337,13 +336,68 @@ class DownloaderService extends GetxController {
     downloadHistory.insert(0, record);
     activeDownloads.remove(task);
 
-    // [FIX-AUTO-METADATA] Write title, artist, and thumbnail to Hive so
-    // the player shows them immediately without manual editing.
     await _writeDownloadMetadata(task, filePath);
   }
 
-  /// Downloads the YouTube thumbnail and writes a SongMetadata entry to Hive.
-  /// Non-fatal — the song still plays correctly if this fails.
+  // ─── FIX-TITLE-CLEAN + FIX-ARTIST-SPLIT ─────────────────────────────────────
+  // Parses messy YouTube titles into clean title + artist before saving metadata.
+  //
+  // Examples:
+  //   "Joji - LOVE YOU LESS (Official Audio)"  → title:"LOVE YOU LESS"  artist:"Joji"
+  //   "Hev Abi - Para Sa Streets (Lyric Video)" → title:"Para Sa Streets" artist:"Hev Abi"
+  //   "JUNE GLOOM (Official Video)"             → title:"JUNE GLOOM"     artist:(channel name)
+  //   "Her's - Harvey (Official Audio)"         → title:"Harvey"         artist:"Her's"
+  ({String title, String artist}) _cleanYouTubeTitle(
+      String rawTitle, String channelName) {
+    String title = rawTitle.trim();
+    String artist = channelName.trim();
+
+    // ── Step 1: Strip common YouTube suffix noise ─────────────────────────────
+    // Order matters: longer patterns first
+    final noiseSuffixes = [
+      r'\s*[\(\[](Official Music Video|Official Video|Official Audio|Official Lyric Video|Official Lyrics|Lyric Video|Lyrics Video|Lyrics|Audio|Music Video|HD|HQ|4K|MV|Performance Video|Visualizer|Animated Video|Fan Made|Fan Video|Official Visualizer)[\)\]]',
+      r'\s*[\(\[]ft\.?.*?[\)\]]', // (ft. someone)
+      r'\s*[\(\[]feat\.?.*?[\)\]]', // (feat. someone)
+      r'\s*[\(\[]with.*?[\)\]]', // (with someone)
+      r'\s*[\(\[]prod\.?.*?[\)\]]', // (prod. by)
+      r'\s*[\(\[]\d{4}[\)\]]', // (2024)
+      r'\s*\|\s*.*$', // | anything after pipe
+    ];
+
+    for (final pattern in noiseSuffixes) {
+      title = title.replaceAll(RegExp(pattern, caseSensitive: false), '');
+    }
+    title = title.trim();
+
+    // ── Step 2: Split "Artist - Title" if separator present ──────────────────
+    // Only split on the FIRST " - " to avoid splitting within titles like
+    // "One-T + Cool-T - The Magic Key"
+    final sepIdx = title.indexOf(' - ');
+    if (sepIdx > 0 && sepIdx < title.length - 3) {
+      artist = title.substring(0, sepIdx).trim();
+      title = title.substring(sepIdx + 3).trim();
+
+      // After splitting, strip noise from the title part again in case it was
+      // before the separator: "Artist - Title (Official Audio)"
+      for (final pattern in noiseSuffixes) {
+        title = title.replaceAll(RegExp(pattern, caseSensitive: false), '');
+      }
+      title = title.trim();
+    }
+
+    // ── Step 3: Clean up channel name suffixes (e.g. "Joji - Topic") ─────────
+    artist = artist
+        .replaceAll(RegExp(r'\s*-\s*Topic$', caseSensitive: false), '')
+        .replaceAll(RegExp(r'\s*VEVO$', caseSensitive: false), '')
+        .replaceAll(RegExp(r'\s*Official$', caseSensitive: false), '')
+        .trim();
+
+    // Fallback: if title ended up empty, use original raw title
+    if (title.isEmpty) title = rawTitle.trim();
+
+    return (title: title, artist: artist);
+  }
+
   Future<void> _writeDownloadMetadata(
       DownloadTask task, String filePath) async {
     try {
@@ -352,8 +406,9 @@ class DownloaderService extends GetxController {
       // Download thumbnail as a local JPEG next to the audio file
       if (task.thumbnail.isNotEmpty) {
         try {
-          final http = await HttpClient().getUrl(Uri.parse(task.thumbnail));
-          final response = await http.close();
+          final httpClient = HttpClient();
+          final req = await httpClient.getUrl(Uri.parse(task.thumbnail));
+          final response = await req.close();
           if (response.statusCode == 200) {
             final thumbPath =
                 filePath.replaceAll(RegExp(r'\.(mp3|flac|m4a)$'), '_thumb.jpg');
@@ -364,26 +419,25 @@ class DownloaderService extends GetxController {
             await File(thumbPath).writeAsBytes(bytes);
             artPath = thumbPath;
           }
-        } catch (_) {
-          // Thumbnail download failed — continue without art
-        }
+        } catch (_) {}
       }
 
-      // Write SongMetadata to Hive (same box + key scheme as MetadataService)
+      // FIX-TITLE-CLEAN: parse messy YouTube title into clean title + artist
+      final cleaned = _cleanYouTubeTitle(task.title, task.author);
+
       final box = Hive.box<SongMetadata>('song_metadata');
       final existing = box.get(filePath);
 
-      // Only write if no user-edited metadata exists yet
       if (existing == null) {
         final meta = SongMetadata(
           filePath: filePath,
-          customTitle: task.title.isNotEmpty ? task.title : null,
-          customArtist: task.author.isNotEmpty ? task.author : null,
+          customTitle: cleaned.title.isNotEmpty ? cleaned.title : null,
+          customArtist: cleaned.artist.isNotEmpty ? cleaned.artist : null,
           customAlbum: 'YouTube Download',
           artImagePath: artPath,
         );
         await box.put(filePath, meta);
-        debugPrint('Auto-metadata written for: ${task.title}');
+        debugPrint('Auto-metadata: "${cleaned.title}" by "${cleaned.artist}"');
       }
     } catch (e) {
       debugPrint('Auto-metadata write failed (non-fatal): $e');

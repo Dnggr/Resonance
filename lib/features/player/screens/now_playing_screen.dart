@@ -1,14 +1,26 @@
 // lib/features/player/screens/now_playing_screen.dart
 //
-// FIX LOG (this session):
-//  [FIX-ART-SQUARE]   Album art container uses AspectRatio(1) — always square.
-//  [FIX-QUEUE-SCROLL] Queue tab auto-scrolls to currently playing song.
-//  [FEAT-LYRICS]      Spotify-style lyrics: PageView swipe or Lyrics button.
-//                     Auto-fetches synced .lrc from lrclib.net when no local
-//                     file exists. Saves to disk so it works offline after
-//                     first fetch. Karaoke highlighting + auto-scroll.
-//  [FIX-LYRICS-FALLBACK] Multi-API waterfall: asset cache → lrclib.net →
-//                     lyrics.ovh. Better coverage for Tagalog/OPM songs.
+// FIXES THIS SESSION:
+//  [FIX-QUEUE-OVERFLOW]  Header row text overflow — "RIGHT OVERFLOWED BY X px"
+//    was caused by the source label being too long for a plain Text widget inside
+//    a Row. Fixed with Flexible + overflow: TextOverflow.ellipsis.
+//
+//  [FIX-QUEUE-SHUFFLE-ORDER]  In shuffle mode the queue list still showed
+//    alphabetical order. The queue list is now reordered to match _shuffleOrder
+//    when shuffle is on: the currently playing song is at the top, followed by
+//    the upcoming songs in shuffle sequence, then already-played songs greyed out.
+//    The controller exposes shuffleOrder and shufflePos as getters for this.
+//
+//  [FIX-QUEUE-SCROLL-RETRIGGER]  _lastScrolledTo comparison prevented re-scroll
+//    when switching tabs. Now scrolls every time the Queue tab becomes visible.
+//
+//  [FIX-LYRICS-SONG-CHANGE]  When the song advances automatically, _LyricsPage
+//    received a new `song` prop but Flutter reused the old State object, leaving
+//    the stale ScrollController position and old lyrics data. Fixed by:
+//    1. Giving _LyricsPage a ValueKey(song.path) — forces full widget recreation
+//       when the song changes, so the scroll position resets to 0.
+//    2. The _LyricsPageState._load() guard still prevents redundant network
+//       fetches for the same path within one widget lifetime.
 
 import 'dart:convert';
 import 'dart:io';
@@ -24,8 +36,9 @@ import '../../../core/services/metadata_service.dart';
 import '../controllers/player_controller.dart';
 import '../../playlist/controllers/playlist_controller.dart';
 import '../../equalizer/screens/equalizer_screen.dart';
+import '../../../lyrics/screens/lyrics_sync_screen.dart';
 
-// ─── LRC Parser ─────────────────────────────────────────────────────────────
+// ─── LRC Parser ──────────────────────────────────────────────────────────────
 
 class LrcLine {
   final Duration time;
@@ -52,7 +65,6 @@ List<LrcLine> parseLrc(String content) {
   return lines;
 }
 
-/// Returns existing local lyrics path (.lrc preferred over .txt), or null.
 String? _lrcPathFor(String audioPath) {
   final base = audioPath.replaceAll(
       RegExp(r'\.(mp3|flac|m4a)$', caseSensitive: false), '');
@@ -63,131 +75,98 @@ String? _lrcPathFor(String audioPath) {
   return null;
 }
 
-/// Returns the path where a fetched .lrc should be saved (next to the audio).
 String _lrcSavePath(String audioPath) {
   final base = audioPath.replaceAll(
       RegExp(r'\.(mp3|flac|m4a)$', caseSensitive: false), '');
   return '$base.lrc';
 }
 
-// ─── Lyrics Fetch: asset cache → lrclib.net → lyrics.ovh ────────────────────
-// Waterfall:
-//   1. assets/lyrics/<title>.lrc  (instant, offline, bundled in app)
-//   2. lrclib.net                 (synced LRC preferred, plain fallback)
-//   3. lyrics.ovh                 (plain text, better for Tagalog/OPM)
+// ─── Lyrics fetch: asset cache → lrclib.net → lyrics.ovh ────────────────────
+
 Future<String?> _fetchLrcFromNet({
   required String title,
   String? artist,
   int? durationSeconds,
 }) async {
-  // Step 0: bundled asset cache (instant, offline)
-  final assetResult = await _loadFromAssets(title);
-  if (assetResult != null) return assetResult;
-
-  // Step 1+2: lrclib.net (synced preferred, plain fallback)
-  final lrclibResult = await _fetchFromLrclib(
-    title: title,
-    artist: artist,
-    durationSeconds: durationSeconds,
-  );
-  if (lrclibResult != null) return lrclibResult;
-
-  // Step 3: lyrics.ovh (plain text, better for Tagalog/OPM)
+  final assetHit = await _loadFromAssets(title);
+  if (assetHit != null) return assetHit;
+  final lrclibHit = await _fetchFromLrclib(
+      title: title, artist: artist, durationSeconds: durationSeconds);
+  if (lrclibHit != null) return lrclibHit;
   return _fetchFromLyricsOvh(title: title, artist: artist);
 }
 
-/// Check bundled assets/lyrics/<title>.lrc before any network call.
-/// To use: create assets/lyrics/ folder, add to pubspec.yaml assets:,
-/// and place files like "Pasilyo.lrc", "Alipin.lrc" etc. there.
 Future<String?> _loadFromAssets(String title) async {
-  final candidates = [
+  for (final path in [
     'assets/lyrics/$title.lrc',
     'assets/lyrics/$title.txt',
     'assets/lyrics/${title.replaceAll(' ', '_')}.lrc',
-  ];
-  for (final assetPath in candidates) {
+  ]) {
     try {
-      final content = await rootBundle.loadString(assetPath);
-      if (content.trim().isNotEmpty) return content;
+      final s = await rootBundle.loadString(path);
+      if (s.trim().isNotEmpty) return s;
     } catch (_) {}
   }
   return null;
 }
 
-/// lrclib.net — synced LRC preferred, plain text fallback.
-Future<String?> _fetchFromLrclib({
-  required String title,
-  String? artist,
-  int? durationSeconds,
-}) async {
+Future<String?> _fetchFromLrclib(
+    {required String title, String? artist, int? durationSeconds}) async {
   const base = 'https://lrclib.net/api';
-
-  Future<String?> tryQuery(Uri uri) async {
+  Future<String?> q(Uri uri) async {
     try {
       final res = await http.get(uri, headers: {
         'User-Agent': 'Resonance/1.0'
       }).timeout(const Duration(seconds: 8));
       if (res.statusCode != 200) return null;
       final json = jsonDecode(res.body);
+      String? pick(Map e) {
+        final s = e['syncedLyrics'] as String?;
+        final p = e['plainLyrics'] as String?;
+        return (s != null && s.isNotEmpty) ? s : p;
+      }
 
       if (json is List) {
         if (json.isEmpty) return null;
-        final withSynced = json
-            .where((e) =>
-                e['syncedLyrics'] != null &&
-                (e['syncedLyrics'] as String).isNotEmpty)
-            .toList();
-        final pick = withSynced.isNotEmpty ? withSynced.first : json.first;
-        final synced = pick['syncedLyrics'] as String?;
-        final plain = pick['plainLyrics'] as String?;
-        return (synced != null && synced.isNotEmpty) ? synced : plain;
+        final synced = json.where((e) =>
+            e['syncedLyrics'] != null &&
+            (e['syncedLyrics'] as String).isNotEmpty);
+        final best = synced.isNotEmpty ? synced.first : json.first;
+        return pick(best as Map);
       } else if (json is Map) {
-        final synced = json['syncedLyrics'] as String?;
-        final plain = json['plainLyrics'] as String?;
-        return (synced != null && synced.isNotEmpty) ? synced : plain;
+        return pick(json as Map);
       }
     } catch (_) {}
     return null;
   }
 
-  // Most precise: title + artist + duration
   if (artist != null && artist != 'Unknown Artist' && durationSeconds != null) {
-    final r = await tryQuery(Uri.parse('$base/get').replace(queryParameters: {
+    final r = await q(Uri.parse('$base/get').replace(queryParameters: {
       'track_name': title,
       'artist_name': artist,
       'duration': '$durationSeconds',
     }));
     if (r != null) return r;
   }
-
-  // Title + artist search
   if (artist != null && artist != 'Unknown Artist') {
-    final r =
-        await tryQuery(Uri.parse('$base/search').replace(queryParameters: {
+    final r = await q(Uri.parse('$base/search').replace(queryParameters: {
       'track_name': title,
       'artist_name': artist,
     }));
     if (r != null) return r;
   }
-
-  // Title only fallback
-  return tryQuery(Uri.parse('$base/search')
+  return q(Uri.parse('$base/search')
       .replace(queryParameters: {'track_name': title}));
 }
 
-/// lyrics.ovh — plain text, better coverage for Tagalog/OPM content.
-Future<String?> _fetchFromLyricsOvh({
-  required String title,
-  String? artist,
-}) async {
-  final effectiveArtist =
-      (artist != null && artist != 'Unknown Artist') ? artist : null;
-  if (effectiveArtist == null) return null;
-
+Future<String?> _fetchFromLyricsOvh(
+    {required String title, String? artist}) async {
+  if (artist == null || artist == 'Unknown Artist') return null;
   try {
-    final uri = Uri.parse(
-        'https://api.lyrics.ovh/v1/${Uri.encodeComponent(effectiveArtist)}/${Uri.encodeComponent(title)}');
-    final res = await http.get(uri).timeout(const Duration(seconds: 8));
+    final res = await http
+        .get(Uri.parse(
+            'https://api.lyrics.ovh/v1/${Uri.encodeComponent(artist)}/${Uri.encodeComponent(title)}'))
+        .timeout(const Duration(seconds: 8));
     if (res.statusCode != 200) return null;
     final body = res.body;
     final start = body.indexOf('"lyrics"');
@@ -206,7 +185,7 @@ Future<String?> _fetchFromLyricsOvh({
   }
 }
 
-// ─── Main Screen ────────────────────────────────────────────────────────────
+// ─── Main Screen ─────────────────────────────────────────────────────────────
 
 class NowPlayingScreen extends StatefulWidget {
   const NowPlayingScreen({super.key});
@@ -307,10 +286,9 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
               const SizedBox(height: 8),
               if (plCtrl.playlists.isEmpty)
                 const Padding(
-                  padding: EdgeInsets.all(24),
-                  child: Text('No playlists yet. Create one from the Library.',
-                      style: TextStyle(color: Colors.white38)),
-                )
+                    padding: EdgeInsets.all(24),
+                    child: Text('No playlists yet.',
+                        style: TextStyle(color: Colors.white38)))
               else
                 ...plCtrl.playlists.map((pl) => ListTile(
                       leading: const Icon(Icons.playlist_play_rounded,
@@ -337,9 +315,7 @@ class _NowPlayingScreenState extends State<NowPlayingScreen>
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Player tab — contains PageView: left=player, right=lyrics (Spotify style)
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Player Tab ───────────────────────────────────────────────────────────────
 
 class _PlayerTab extends StatefulWidget {
   final PlayerController ctrl;
@@ -355,13 +331,8 @@ class _PlayerTabState extends State<_PlayerTab> {
   bool _showingLyrics = false;
 
   void _toggleLyrics() {
-    if (_showingLyrics) {
-      _pageCtrl.animateToPage(0,
-          duration: const Duration(milliseconds: 350), curve: Curves.easeInOut);
-    } else {
-      _pageCtrl.animateToPage(1,
-          duration: const Duration(milliseconds: 350), curve: Curves.easeInOut);
-    }
+    _pageCtrl.animateToPage(_showingLyrics ? 0 : 1,
+        duration: const Duration(milliseconds: 350), curve: Curves.easeInOut);
     setState(() => _showingLyrics = !_showingLyrics);
   }
 
@@ -385,164 +356,196 @@ class _PlayerTabState extends State<_PlayerTab> {
         meta = Get.find<MetadataService>().get(song.path);
       } catch (_) {}
 
-      return Column(
-        children: [
-          // ── PageView: Player view (page 0) ↔ Lyrics view (page 1) ─────
-          Expanded(
-            child: PageView(
-              controller: _pageCtrl,
-              onPageChanged: (idx) => setState(() => _showingLyrics = idx == 1),
-              children: [
-                // Page 0: Album art + song info
-                _PlayerPage(
+      return Column(children: [
+        Expanded(
+          child: PageView(
+            controller: _pageCtrl,
+            onPageChanged: (i) => setState(() => _showingLyrics = i == 1),
+            children: [
+              _PlayerPage(
                   ctrl: widget.ctrl,
                   song: song,
                   meta: meta,
-                  onAddToPlaylist: widget.onAddToPlaylist,
-                ),
-                // Page 1: Karaoke lyrics
-                _LyricsPage(ctrl: widget.ctrl, song: song),
-              ],
-            ),
+                  onAddToPlaylist: widget.onAddToPlaylist),
+              // FIX-LYRICS-SONG-CHANGE: ValueKey forces full widget recreation
+              // when song.path changes, so ScrollController resets to 0 and
+              // stale lyrics state is discarded. Without this key, Flutter
+              // reuses the old _LyricsPageState and tries to scroll to the
+              // old song's active line index in the new (empty) scroll area.
+              _LyricsPage(
+                  key: ValueKey(song.path), ctrl: widget.ctrl, song: song),
+            ],
           ),
-
-          // ── Seek bar ───────────────────────────────────────────────────
-          _SeekBar(ctrl: widget.ctrl),
-          const SizedBox(height: 4),
-
-          // ── Controls ───────────────────────────────────────────────────
-          _Controls(ctrl: widget.ctrl),
-          const SizedBox(height: 8),
-
-          // ── Lyrics toggle button (below controls, Spotify style) ────────
-          TextButton.icon(
-            onPressed: _toggleLyrics,
-            icon: Icon(
-              _showingLyrics ? Icons.music_note_rounded : Icons.lyrics_rounded,
-              size: 16,
-              color: _showingLyrics ? AppTheme.primary : Colors.white38,
-            ),
-            label: Text(
-              _showingLyrics ? 'Back to player' : 'Lyrics',
-              style: TextStyle(
+        ),
+        _SeekBar(ctrl: widget.ctrl),
+        const SizedBox(height: 4),
+        _Controls(ctrl: widget.ctrl),
+        const SizedBox(height: 8),
+        TextButton.icon(
+          onPressed: _toggleLyrics,
+          icon: Icon(
+            _showingLyrics ? Icons.music_note_rounded : Icons.lyrics_rounded,
+            size: 16,
+            color: _showingLyrics ? AppTheme.primary : Colors.white38,
+          ),
+          label: Text(
+            _showingLyrics ? 'Back to player' : 'Lyrics',
+            style: TextStyle(
                 color: _showingLyrics ? AppTheme.primary : Colors.white38,
-                fontSize: 13,
-              ),
-            ),
+                fontSize: 13),
           ),
-          const SizedBox(height: 12),
-        ],
-      );
+        ),
+        const SizedBox(height: 12),
+      ]);
     });
   }
 }
 
-// ─── Player page (album art + song info) ────────────────────────────────────
+// ─── Player Page ──────────────────────────────────────────────────────────────
 
 class _PlayerPage extends StatelessWidget {
   final PlayerController ctrl;
   final SongFile song;
   final SongMetadata? meta;
   final Function(String) onAddToPlaylist;
-
-  const _PlayerPage({
-    required this.ctrl,
-    required this.song,
-    required this.meta,
-    required this.onAddToPlaylist,
-  });
+  const _PlayerPage(
+      {required this.ctrl,
+      required this.song,
+      required this.meta,
+      required this.onAddToPlaylist});
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        // ── Album art — FIX: AspectRatio(1) guarantees square ──────────
-        Expanded(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(40, 16, 40, 8),
-            child: Center(
-              child: AspectRatio(
-                aspectRatio: 1,
-                child: _AlbumArtWidget(song: song, meta: meta),
+    return Column(children: [
+      Expanded(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(40, 16, 40, 8),
+          child: Center(
+            child: AspectRatio(
+                aspectRatio: 1, child: _AlbumArtWidget(song: song, meta: meta)),
+          ),
+        ),
+      ),
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 32),
+        child: Row(children: [
+          Expanded(
+            child:
+                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(
+                meta?.customTitle?.isNotEmpty == true
+                    ? meta!.customTitle!
+                    : song.name,
+                style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
               ),
+              const SizedBox(height: 4),
+              Text(
+                meta?.customArtist?.isNotEmpty == true
+                    ? meta!.customArtist!
+                    : 'Unknown Artist',
+                style: const TextStyle(color: Colors.white60, fontSize: 14),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              const SizedBox(height: 2),
+              Text(
+                meta?.customAlbum?.isNotEmpty == true
+                    ? meta!.customAlbum!
+                    : song.ext.toUpperCase(),
+                style: const TextStyle(color: Colors.white38, fontSize: 12),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ]),
+          ),
+          IconButton(
+            icon:
+                const Icon(Icons.edit_rounded, color: Colors.white30, size: 20),
+            onPressed: () => showModalBottomSheet(
+              context: context,
+              isScrollControlled: true,
+              backgroundColor: Colors.transparent,
+              builder: (_) => EditMetadataSheet(song: song),
             ),
           ),
-        ),
+        ]),
+      ),
+      const SizedBox(height: 16),
+    ]);
+  }
+}
 
-        // ── Song info + edit ───────────────────────────────────────────
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 32),
-          child: Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      meta?.customTitle?.isNotEmpty == true
-                          ? meta!.customTitle!
-                          : song.name,
-                      style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 20,
-                          fontWeight: FontWeight.bold),
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      meta?.customArtist?.isNotEmpty == true
-                          ? meta!.customArtist!
-                          : 'Unknown Artist',
-                      style:
-                          const TextStyle(color: Colors.white60, fontSize: 14),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      meta?.customAlbum?.isNotEmpty == true
-                          ? meta!.customAlbum!
-                          : song.ext.toUpperCase(),
-                      style:
-                          const TextStyle(color: Colors.white38, fontSize: 12),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ],
-                ),
-              ),
-              IconButton(
-                icon: const Icon(Icons.edit_rounded,
-                    color: Colors.white30, size: 20),
-                tooltip: 'Edit song info',
-                onPressed: () => _showEditMetadata(context, song),
-              ),
+// ─── Album Art ────────────────────────────────────────────────────────────────
+
+class _AlbumArtWidget extends StatelessWidget {
+  final SongFile song;
+  final SongMetadata? meta;
+  const _AlbumArtWidget({required this.song, required this.meta});
+
+  @override
+  Widget build(BuildContext context) {
+    final artPath = meta?.artImagePath;
+    final hasArt = artPath != null && File(artPath).existsSync();
+    return GestureDetector(
+      onLongPress: () => showModalBottomSheet(
+        context: context,
+        isScrollControlled: true,
+        backgroundColor: Colors.transparent,
+        builder: (_) => EditMetadataSheet(song: song),
+      ),
+      child: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 300),
+        child: Container(
+          key: ValueKey(artPath ?? 'placeholder'),
+          clipBehavior: Clip.hardEdge,
+          decoration: BoxDecoration(
+            color: AppTheme.surface,
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(
+                color: hasArt
+                    ? Colors.white12
+                    : AppTheme.primary.withOpacity(0.3)),
+            boxShadow: [
+              BoxShadow(
+                  color: AppTheme.primary.withOpacity(hasArt ? 0.1 : 0.2),
+                  blurRadius: 40,
+                  offset: const Offset(0, 8))
             ],
           ),
+          child: hasArt
+              ? Image.file(File(artPath!),
+                  fit: BoxFit.cover,
+                  width: double.infinity,
+                  height: double.infinity)
+              : Center(
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  const Icon(Icons.music_note_rounded,
+                      color: AppTheme.primary, size: 80),
+                  const SizedBox(height: 8),
+                  Text('Long-press to add art',
+                      style: TextStyle(
+                          color: Colors.white.withOpacity(0.2), fontSize: 11)),
+                ])),
         ),
-        const SizedBox(height: 16),
-      ],
-    );
-  }
-
-  void _showEditMetadata(BuildContext context, SongFile song) {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (_) => EditMetadataSheet(song: song),
+      ),
     );
   }
 }
 
-// ─── Lyrics page (karaoke scrolling) ────────────────────────────────────────
+// ─── Lyrics Page ──────────────────────────────────────────────────────────────
+
+enum _LyricsState { idle, fetching, loaded, notFound, error }
 
 class _LyricsPage extends StatefulWidget {
   final PlayerController ctrl;
   final SongFile song;
-
-  const _LyricsPage({required this.ctrl, required this.song});
+  // KEY IS SET BY PARENT: ValueKey(song.path) — see _PlayerTabState.build()
+  const _LyricsPage({super.key, required this.ctrl, required this.song});
 
   @override
   State<_LyricsPage> createState() => _LyricsPageState();
@@ -551,14 +554,20 @@ class _LyricsPage extends StatefulWidget {
 class _LyricsPageState extends State<_LyricsPage> {
   List<LrcLine> _lines = [];
   String? _plainText;
-
-  // State machine for loading
-  // idle → loading → loaded | error | notFound
   _LyricsState _state = _LyricsState.idle;
-  String? _loadedFor; // audio path that was loaded
-  bool _fetching = false; // true while network request is in flight
-
+  String? _loadedFor;
+  bool _fetching = false;
+  // ScrollController starts fresh on every widget creation (new song)
   final ScrollController _scrollCtrl = ScrollController();
+
+  @override
+  void initState() {
+    super.initState();
+    // Load immediately when the widget is created for this song
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _load(widget.song);
+    });
+  }
 
   @override
   void dispose() {
@@ -566,26 +575,20 @@ class _LyricsPageState extends State<_LyricsPage> {
     super.dispose();
   }
 
-  // Called when the song changes or when the user taps "Try again"
   Future<void> _load(SongFile song) async {
-    // Don't reload if we already have lyrics for this exact file
     if (_loadedFor == song.path && _state == _LyricsState.loaded) return;
-    // Don't double-fetch
     if (_loadedFor == song.path && _fetching) return;
-
     _loadedFor = song.path;
     _lines = [];
     _plainText = null;
     _fetching = false;
 
-    // ── Step 1: Check for a local .lrc / .txt file ───────────────────────
     final localPath = _lrcPathFor(song.path);
     if (localPath != null) {
-      _parseAndSetLocal(localPath);
+      _parseLocal(localPath);
       return;
     }
 
-    // ── Step 2: No local file → fetch from network ────────────────────
     if (!mounted) return;
     setState(() {
       _state = _LyricsState.fetching;
@@ -593,31 +596,24 @@ class _LyricsPageState extends State<_LyricsPage> {
     });
 
     try {
-      // Get title and artist from metadata if available
       String title = song.name;
       String? artist;
-      int? durationSecs;
+      int? durSecs;
       try {
-        final meta = Get.find<MetadataService>().get(song.path);
-        if (meta?.customTitle?.isNotEmpty == true) title = meta!.customTitle!;
-        if (meta?.customArtist?.isNotEmpty == true)
-          artist = meta!.customArtist!;
+        final m = Get.find<MetadataService>().get(song.path);
+        if (m?.customTitle?.isNotEmpty == true) title = m!.customTitle!;
+        if (m?.customArtist?.isNotEmpty == true) artist = m!.customArtist!;
       } catch (_) {}
       try {
-        final ctrl = Get.find<PlayerController>();
-        final dur = ctrl.duration.value;
-        if (dur.inSeconds > 0) durationSecs = dur.inSeconds;
+        final d = Get.find<PlayerController>().duration.value;
+        if (d.inSeconds > 0) durSecs = d.inSeconds;
       } catch (_) {}
 
-      final lrcContent = await _fetchLrcFromNet(
-        title: title,
-        artist: artist,
-        durationSeconds: durationSecs,
-      );
-
+      final content = await _fetchLrcFromNet(
+          title: title, artist: artist, durationSeconds: durSecs);
       if (!mounted) return;
 
-      if (lrcContent == null || lrcContent.trim().isEmpty) {
+      if (content == null || content.trim().isEmpty) {
         setState(() {
           _state = _LyricsState.notFound;
           _fetching = false;
@@ -625,28 +621,21 @@ class _LyricsPageState extends State<_LyricsPage> {
         return;
       }
 
-      // Save to disk next to the audio so it works offline next time
-      final savePath = _lrcSavePath(song.path);
       try {
-        await File(savePath).writeAsString(lrcContent);
-      } catch (_) {
-        // Non-fatal: still display lyrics in memory
-      }
+        await File(_lrcSavePath(song.path)).writeAsString(content);
+      } catch (_) {}
 
-      // Parse and display
-      final parsed = parseLrc(lrcContent);
+      final parsed = parseLrc(content);
       setState(() {
         _fetching = false;
         if (parsed.isNotEmpty) {
           _lines = parsed;
-          _state = _LyricsState.loaded;
         } else {
-          // returned plain text (no timestamps)
-          _plainText = lrcContent.trim();
-          _state = _LyricsState.loaded;
+          _plainText = content.trim();
         }
+        _state = _LyricsState.loaded;
       });
-    } catch (e) {
+    } catch (_) {
       if (!mounted) return;
       setState(() {
         _state = _LyricsState.error;
@@ -655,11 +644,10 @@ class _LyricsPageState extends State<_LyricsPage> {
     }
   }
 
-  void _parseAndSetLocal(String localPath) {
+  void _parseLocal(String path) {
     try {
-      final content = File(localPath).readAsStringSync();
-      final parsed =
-          localPath.endsWith('.lrc') ? parseLrc(content) : <LrcLine>[];
+      final content = File(path).readAsStringSync();
+      final parsed = path.endsWith('.lrc') ? parseLrc(content) : <LrcLine>[];
       setState(() {
         if (parsed.isNotEmpty) {
           _lines = parsed;
@@ -677,136 +665,123 @@ class _LyricsPageState extends State<_LyricsPage> {
     }
   }
 
-  int _activeIndex(Duration pos) {
+  int _activeIdx(Duration pos) {
     if (_lines.isEmpty) return -1;
-    int active = 0;
+    int a = 0;
     for (int i = 0; i < _lines.length; i++) {
       if (_lines[i].time <= pos)
-        active = i;
+        a = i;
       else
         break;
     }
-    return active;
+    return a;
   }
 
-  void _autoScroll(int activeIdx) {
-    if (!_scrollCtrl.hasClients || activeIdx < 0) return;
-    final target =
-        (activeIdx * 56.0) - (_scrollCtrl.position.viewportDimension / 2) + 28;
-    _scrollCtrl.animateTo(
-      target.clamp(0, _scrollCtrl.position.maxScrollExtent),
-      duration: const Duration(milliseconds: 300),
-      curve: Curves.easeOut,
-    );
+  void _autoScroll(int idx) {
+    if (!_scrollCtrl.hasClients || idx < 0) return;
+    if (!_scrollCtrl.position.hasContentDimensions) return;
+    final t = (idx * 56.0) - (_scrollCtrl.position.viewportDimension / 2) + 28;
+    _scrollCtrl.animateTo(t.clamp(0, _scrollCtrl.position.maxScrollExtent),
+        duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
+  }
+
+  void _reset() {
+    setState(() {
+      _state = _LyricsState.idle;
+      _loadedFor = null;
+    });
+    _load(widget.song);
   }
 
   @override
   Widget build(BuildContext context) {
     return Obx(() {
-      final song = widget.ctrl.currentSong;
-      if (song == null) {
+      // Guard: only use lyrics that belong to the currently playing song.
+      // This prevents race conditions where position from song A scrolls
+      // lyrics of song B.
+      final currentSong = widget.ctrl.currentSong;
+      if (currentSong == null || currentSong.path != widget.song.path) {
         return const Center(
-            child: Text('Nothing playing',
-                style: TextStyle(color: Colors.white38)));
+            child: CircularProgressIndicator(color: AppTheme.primary));
       }
 
-      // Trigger load when song changes (side-effect inside Obx is safe here
-      // because _load is idempotent for the same song path)
-      if (_loadedFor != song.path) {
-        // Schedule after build so setState is not called during build
-        WidgetsBinding.instance.addPostFrameCallback((_) => _load(song));
-      }
-
-      // ── Fetching ────────────────────────────────────────────────────────
       if (_state == _LyricsState.idle || _state == _LyricsState.fetching) {
         return Center(
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            const CircularProgressIndicator(color: AppTheme.primary),
-            const SizedBox(height: 20),
-            Text(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const CircularProgressIndicator(color: AppTheme.primary),
+          const SizedBox(height: 20),
+          Text(
               _state == _LyricsState.fetching
                   ? 'Finding lyrics...'
                   : 'Loading...',
-              style: const TextStyle(color: Colors.white38, fontSize: 14),
-            ),
-          ]),
-        );
+              style: const TextStyle(color: Colors.white38, fontSize: 14)),
+        ]));
       }
 
-      // ── Not found ────────────────────────────────────────────────────────
       if (_state == _LyricsState.notFound) {
         return Center(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 32),
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              const Icon(Icons.lyrics_rounded, color: Colors.white12, size: 64),
-              const SizedBox(height: 16),
-              const Text('No lyrics found',
-                  style: TextStyle(
-                      color: Colors.white38,
-                      fontSize: 18,
-                      fontWeight: FontWeight.w600)),
-              const SizedBox(height: 10),
-              Text(
-                'Couldn\'t find lyrics for this song online.\n'
-                'You can add a .lrc or .txt file with the same name as your audio file.',
-                style: const TextStyle(
-                    color: Colors.white24, fontSize: 13, height: 1.6),
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 20),
-              OutlinedButton.icon(
-                onPressed: () {
-                  setState(() {
-                    _state = _LyricsState.idle;
-                    _loadedFor = null;
-                  });
-                  _load(song);
-                },
-                icon: const Icon(Icons.refresh_rounded,
-                    size: 16, color: AppTheme.primary),
-                label: const Text('Try again',
-                    style: TextStyle(color: AppTheme.primary)),
-                style: OutlinedButton.styleFrom(
-                    side: const BorderSide(color: AppTheme.primary)),
-              ),
-            ]),
-          ),
-        );
-      }
-
-      // ── Error ────────────────────────────────────────────────────────────
-      if (_state == _LyricsState.error) {
-        return Center(
+            child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 32),
           child: Column(mainAxisSize: MainAxisSize.min, children: [
-            const Icon(Icons.wifi_off_rounded, color: Colors.white24, size: 56),
+            const Icon(Icons.lyrics_rounded, color: Colors.white12, size: 64),
             const SizedBox(height: 16),
-            const Text('Couldn\'t load lyrics',
-                style: TextStyle(color: Colors.white38, fontSize: 16)),
-            const SizedBox(height: 8),
-            const Text('Check your connection and try again.',
-                style: TextStyle(color: Colors.white24, fontSize: 13)),
+            const Text('No lyrics found',
+                style: TextStyle(
+                    color: Colors.white38,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w600)),
+            const SizedBox(height: 10),
+            const Text(
+                'Couldn\'t find lyrics online.\nSync them in the Sync Studio.',
+                style:
+                    TextStyle(color: Colors.white24, fontSize: 13, height: 1.6),
+                textAlign: TextAlign.center),
             const SizedBox(height: 20),
+            ElevatedButton.icon(
+              onPressed: () =>
+                  Get.to(() => LyricsSyncScreen(song: widget.song)),
+              icon: const Icon(Icons.tune_rounded, size: 16),
+              label: const Text('Open Sync Studio'),
+              style: ElevatedButton.styleFrom(
+                  backgroundColor: AppTheme.primary,
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10))),
+            ),
+            const SizedBox(height: 10),
             OutlinedButton.icon(
-              onPressed: () {
-                setState(() {
-                  _state = _LyricsState.idle;
-                  _loadedFor = null;
-                });
-                _load(song);
-              },
+              onPressed: _reset,
               icon: const Icon(Icons.refresh_rounded,
                   size: 16, color: AppTheme.primary),
-              label: const Text('Retry',
+              label: const Text('Try again',
                   style: TextStyle(color: AppTheme.primary)),
               style: OutlinedButton.styleFrom(
                   side: const BorderSide(color: AppTheme.primary)),
             ),
           ]),
-        );
+        ));
       }
 
-      // ── Loaded: plain text ───────────────────────────────────────────────
+      if (_state == _LyricsState.error) {
+        return Center(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Icon(Icons.wifi_off_rounded, color: Colors.white24, size: 56),
+          const SizedBox(height: 16),
+          const Text('Couldn\'t load lyrics',
+              style: TextStyle(color: Colors.white38, fontSize: 16)),
+          const SizedBox(height: 20),
+          OutlinedButton.icon(
+            onPressed: _reset,
+            icon: const Icon(Icons.refresh_rounded,
+                size: 16, color: AppTheme.primary),
+            label:
+                const Text('Retry', style: TextStyle(color: AppTheme.primary)),
+            style: OutlinedButton.styleFrom(
+                side: const BorderSide(color: AppTheme.primary)),
+          ),
+        ]));
+      }
+
       if (_lines.isEmpty && _plainText != null) {
         return SingleChildScrollView(
           padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 24),
@@ -816,20 +791,15 @@ class _LyricsPageState extends State<_LyricsPage> {
         );
       }
 
-      // ── Loaded: synced LRC karaoke ────────────────────────────────────────
       final pos = widget.ctrl.position.value;
-      final activeIdx = _activeIndex(pos);
-
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _autoScroll(activeIdx);
-      });
+      final activeIdx = _activeIdx(pos);
+      WidgetsBinding.instance
+          .addPostFrameCallback((_) => _autoScroll(activeIdx));
 
       return ListView.builder(
         controller: _scrollCtrl,
         padding: EdgeInsets.symmetric(
-          horizontal: 24,
-          vertical: MediaQuery.of(context).size.height * 0.3,
-        ),
+            horizontal: 24, vertical: MediaQuery.of(context).size.height * 0.3),
         itemCount: _lines.length,
         itemBuilder: (_, i) {
           final isActive = i == activeIdx;
@@ -861,83 +831,7 @@ class _LyricsPageState extends State<_LyricsPage> {
   }
 }
 
-enum _LyricsState { idle, fetching, loaded, notFound, error }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Album art widget — FIX-ART-SQUARE: outer AspectRatio ensures perfect square
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _AlbumArtWidget extends StatelessWidget {
-  final SongFile song;
-  final SongMetadata? meta;
-  const _AlbumArtWidget({required this.song, required this.meta});
-
-  @override
-  Widget build(BuildContext context) {
-    final artPath = meta?.artImagePath;
-    final hasArt = artPath != null && File(artPath).existsSync();
-
-    return GestureDetector(
-      onLongPress: () => _showEditMetadata(context, song),
-      child: AnimatedSwitcher(
-        duration: const Duration(milliseconds: 300),
-        child: Container(
-          key: ValueKey(artPath ?? 'placeholder'),
-          // FIX: clipBehavior clips image to exact square bounds
-          clipBehavior: Clip.hardEdge,
-          decoration: BoxDecoration(
-            color: AppTheme.surface,
-            borderRadius: BorderRadius.circular(24),
-            border: Border.all(
-                color: hasArt
-                    ? Colors.white12
-                    : AppTheme.primary.withOpacity(0.3)),
-            boxShadow: [
-              BoxShadow(
-                  color: AppTheme.primary.withOpacity(hasArt ? 0.1 : 0.2),
-                  blurRadius: 40,
-                  offset: const Offset(0, 8))
-            ],
-          ),
-          child: hasArt
-              ? Image.file(
-                  File(artPath!),
-                  fit: BoxFit.cover, // FIX: cover fills square without stretch
-                  width: double.infinity,
-                  height: double.infinity,
-                )
-              : Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(Icons.music_note_rounded,
-                          color: AppTheme.primary, size: 80),
-                      const SizedBox(height: 8),
-                      Text('Long-press to add art',
-                          style: TextStyle(
-                              color: Colors.white.withOpacity(0.2),
-                              fontSize: 11)),
-                    ],
-                  ),
-                ),
-        ),
-      ),
-    );
-  }
-
-  void _showEditMetadata(BuildContext context, SongFile song) {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (_) => EditMetadataSheet(song: song),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Seek bar
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Seek Bar ─────────────────────────────────────────────────────────────────
 
 class _SeekBar extends StatefulWidget {
   final PlayerController ctrl;
@@ -947,19 +841,15 @@ class _SeekBar extends StatefulWidget {
 }
 
 class _SeekBarState extends State<_SeekBar> {
-  double? _dragValue;
-
-  String _fmt(Duration d) {
-    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
-    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
-    return '$m:$s';
-  }
+  double? _drag;
+  String _fmt(Duration d) =>
+      '${d.inMinutes.remainder(60).toString().padLeft(2, '0')}:${d.inSeconds.remainder(60).toString().padLeft(2, '0')}';
 
   @override
   Widget build(BuildContext context) {
     return Obx(() {
       final dur = widget.ctrl.duration.value.inSeconds.toDouble();
-      final pos = _dragValue ?? widget.ctrl.position.value.inSeconds.toDouble();
+      final pos = _drag ?? widget.ctrl.position.value.inSeconds.toDouble();
       return Padding(
         padding: const EdgeInsets.symmetric(horizontal: 24),
         child: Column(children: [
@@ -975,11 +865,11 @@ class _SeekBarState extends State<_SeekBar> {
             child: Slider(
               value: pos.clamp(0, dur <= 0 ? 1 : dur),
               max: dur <= 0 ? 1 : dur,
-              onChangeStart: (v) => setState(() => _dragValue = v),
-              onChanged: dur > 0 ? (v) => setState(() => _dragValue = v) : null,
+              onChangeStart: (v) => setState(() => _drag = v),
+              onChanged: dur > 0 ? (v) => setState(() => _drag = v) : null,
               onChangeEnd: (v) {
                 widget.ctrl.seek(v);
-                setState(() => _dragValue = null);
+                setState(() => _drag = null);
               },
             ),
           ),
@@ -989,11 +879,11 @@ class _SeekBarState extends State<_SeekBar> {
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   Text(
-                    _fmt(_dragValue != null
-                        ? Duration(seconds: _dragValue!.toInt())
-                        : widget.ctrl.position.value),
-                    style: const TextStyle(color: Colors.white38, fontSize: 12),
-                  ),
+                      _fmt(_drag != null
+                          ? Duration(seconds: _drag!.toInt())
+                          : widget.ctrl.position.value),
+                      style:
+                          const TextStyle(color: Colors.white38, fontSize: 12)),
                   Text(_fmt(widget.ctrl.duration.value),
                       style:
                           const TextStyle(color: Colors.white38, fontSize: 12)),
@@ -1005,9 +895,7 @@ class _SeekBarState extends State<_SeekBar> {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Playback controls
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Controls ─────────────────────────────────────────────────────────────────
 
 class _Controls extends StatelessWidget {
   final PlayerController ctrl;
@@ -1017,70 +905,73 @@ class _Controls extends StatelessWidget {
   Widget build(BuildContext context) {
     return Obx(() => Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-            children: [
-              IconButton(
-                icon: Icon(Icons.shuffle_rounded,
-                    color: ctrl.shuffleEnabled.value
-                        ? AppTheme.primary
-                        : Colors.white38,
-                    size: 24),
-                onPressed: ctrl.toggleShuffle,
-              ),
-              IconButton(
+          child:
+              Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
+            IconButton(
+              icon: Icon(Icons.shuffle_rounded,
+                  color: ctrl.shuffleEnabled.value
+                      ? AppTheme.primary
+                      : Colors.white38,
+                  size: 24),
+              onPressed: ctrl.toggleShuffle,
+            ),
+            IconButton(
                 icon: const Icon(Icons.skip_previous_rounded,
                     color: Colors.white, size: 36),
-                onPressed: ctrl.playPrev,
+                onPressed: ctrl.playPrev),
+            Container(
+              width: 68,
+              height: 68,
+              decoration: BoxDecoration(
+                  color: AppTheme.primary,
+                  shape: BoxShape.circle,
+                  boxShadow: [
+                    BoxShadow(
+                        color: AppTheme.primary.withOpacity(0.4),
+                        blurRadius: 20,
+                        spreadRadius: 2)
+                  ]),
+              child: IconButton(
+                icon: Icon(
+                    ctrl.isPlaying.value
+                        ? Icons.pause_rounded
+                        : Icons.play_arrow_rounded,
+                    color: Colors.white,
+                    size: 36),
+                onPressed: ctrl.togglePlay,
+                padding: EdgeInsets.zero,
               ),
-              Container(
-                width: 68,
-                height: 68,
-                decoration: BoxDecoration(
-                    color: AppTheme.primary,
-                    shape: BoxShape.circle,
-                    boxShadow: [
-                      BoxShadow(
-                          color: AppTheme.primary.withOpacity(0.4),
-                          blurRadius: 20,
-                          spreadRadius: 2)
-                    ]),
-                child: IconButton(
-                  icon: Icon(
-                      ctrl.isPlaying.value
-                          ? Icons.pause_rounded
-                          : Icons.play_arrow_rounded,
-                      color: Colors.white,
-                      size: 36),
-                  onPressed: ctrl.togglePlay,
-                  padding: EdgeInsets.zero,
-                ),
-              ),
-              IconButton(
+            ),
+            IconButton(
                 icon: const Icon(Icons.skip_next_rounded,
                     color: Colors.white, size: 36),
-                onPressed: ctrl.playNext,
-              ),
-              IconButton(
-                icon: Icon(
-                    ctrl.loopMode.value == LoopMode.one
-                        ? Icons.repeat_one_rounded
-                        : Icons.repeat_rounded,
-                    color: ctrl.loopMode.value != LoopMode.none
-                        ? AppTheme.primary
-                        : Colors.white38,
-                    size: 24),
-                onPressed: ctrl.cycleLoopMode,
-              ),
-            ],
-          ),
+                onPressed: ctrl.playNext),
+            IconButton(
+              icon: Icon(
+                  ctrl.loopMode.value == LoopMode.one
+                      ? Icons.repeat_one_rounded
+                      : Icons.repeat_rounded,
+                  color: ctrl.loopMode.value != LoopMode.none
+                      ? AppTheme.primary
+                      : Colors.white38,
+                  size: 24),
+              onPressed: ctrl.cycleLoopMode,
+            ),
+          ]),
         ));
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Queue tab — FIX-QUEUE-SCROLL: auto-scrolls to currently playing song
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Queue Tab ────────────────────────────────────────────────────────────────
+//
+// FIX-QUEUE-SHUFFLE-ORDER: When shuffle is enabled, the list is reordered to
+// show the shuffle sequence instead of the raw alphabetical queue.
+// Layout: [current song at top] → [upcoming in shuffle order] → [already played, greyed]
+//
+// FIX-QUEUE-OVERFLOW: Flexible + ellipsis on the header text.
+//
+// FIX-QUEUE-SCROLL-RETRIGGER: Removed _lastScrolledTo guard so scroll fires
+// every time the Obx rebuilds (which only happens when queueIndex or queue changes).
 
 class _QueueTab extends StatefulWidget {
   final PlayerController ctrl;
@@ -1092,7 +983,6 @@ class _QueueTab extends StatefulWidget {
 
 class _QueueTabState extends State<_QueueTab> {
   final ScrollController _scrollCtrl = ScrollController();
-  int? _lastScrolledTo;
 
   @override
   void dispose() {
@@ -1100,12 +990,13 @@ class _QueueTabState extends State<_QueueTab> {
     super.dispose();
   }
 
+  // FIX-QUEUE-SCROLL-RETRIGGER: removed _lastScrolledTo check.
+  // This now fires on every queueIndex change, which is exactly when we want it.
   void _scrollToCurrentSong(int idx) {
-    if (idx == _lastScrolledTo) return;
-    _lastScrolledTo = idx;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scrollCtrl.hasClients) return;
-      const itemHeight = 64.0;
+      if (!_scrollCtrl.position.hasContentDimensions) return;
+      const itemHeight = 68.0;
       final target = (idx * itemHeight) -
           (_scrollCtrl.position.viewportDimension / 2) +
           (itemHeight / 2);
@@ -1120,97 +1011,199 @@ class _QueueTabState extends State<_QueueTab> {
   @override
   Widget build(BuildContext context) {
     return Obx(() {
-      if (widget.ctrl.queue.isEmpty) {
+      final ctrl = widget.ctrl;
+      if (ctrl.queue.isEmpty) {
         return const Center(
             child: Text('Queue is empty',
                 style: TextStyle(color: Colors.white38)));
       }
 
-      final currentIdx = widget.ctrl.queueIndex.value;
-      _scrollToCurrentSong(currentIdx);
+      final isShuffle = ctrl.shuffleEnabled.value;
+      final currentQueueIdx = ctrl.queueIndex.value;
+      final currentSong =
+          currentQueueIdx >= 0 && currentQueueIdx < ctrl.queue.length
+              ? ctrl.queue[currentQueueIdx]
+              : null;
+
+      // FIX-QUEUE-SHUFFLE-ORDER:
+      // Build a display list that reflects actual playback order.
+      // Each entry: (songFile, originalQueueIndex, isPlayed)
+      final List<({SongFile song, int queueIdx, bool isPlayed})> displayList;
+
+      if (isShuffle && ctrl.shuffleOrder.isNotEmpty) {
+        // shuffleOrder[0..shufflePos] = played (including current at shufflePos)
+        // shuffleOrder[shufflePos+1..end] = upcoming
+        final order = ctrl.shuffleOrder;
+        final pos = ctrl.shufflePos;
+        displayList = [
+          // Current song first (pos in shuffleOrder)
+          if (pos < order.length && order[pos] < ctrl.queue.length)
+            (
+              song: ctrl.queue[order[pos]],
+              queueIdx: order[pos],
+              isPlayed: false
+            ),
+          // Upcoming songs in shuffle order
+          for (int i = pos + 1; i < order.length; i++)
+            if (order[i] < ctrl.queue.length)
+              (song: ctrl.queue[order[i]], queueIdx: order[i], isPlayed: false),
+          // Already-played songs (before pos, greyed out)
+          for (int i = pos - 1; i >= 0; i--)
+            if (order[i] < ctrl.queue.length)
+              (song: ctrl.queue[order[i]], queueIdx: order[i], isPlayed: true),
+        ];
+      } else {
+        // Normal order — just show queue as-is
+        displayList = [
+          for (int i = 0; i < ctrl.queue.length; i++)
+            (song: ctrl.queue[i], queueIdx: i, isPlayed: i < currentQueueIdx),
+        ];
+      }
+
+      // In normal mode, the current song's display index = currentQueueIdx.
+      // In shuffle mode, it's always index 0 in our display list.
+      final displayCurrentIdx =
+          isShuffle && ctrl.shuffleOrder.isNotEmpty ? 0 : currentQueueIdx;
+      _scrollToCurrentSong(displayCurrentIdx);
 
       return Column(children: [
+        // FIX-QUEUE-OVERFLOW: Flexible wraps the long text so it can't overflow
         Padding(
           padding: const EdgeInsets.fromLTRB(20, 12, 20, 8),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                  '${widget.ctrl.queue.length} songs · ${widget.ctrl.queueSource.value}',
-                  style: const TextStyle(color: Colors.white54, fontSize: 13)),
+          child: Row(children: [
+            Flexible(
+              child: Text(
+                '${ctrl.queue.length} songs · ${ctrl.queueSource.value}'
+                '${isShuffle ? ' · Shuffle' : ''}',
+                style: const TextStyle(color: Colors.white54, fontSize: 13),
+                overflow: TextOverflow.ellipsis,
+                maxLines: 1,
+              ),
+            ),
+            const SizedBox(width: 8),
+            if (!isShuffle)
               const Text('Hold to reorder',
                   style: TextStyle(color: Colors.white24, fontSize: 12)),
-            ],
-          ),
+          ]),
         ),
+
         Expanded(
-          child: ReorderableListView.builder(
-            scrollController: _scrollCtrl,
-            itemCount: widget.ctrl.queue.length,
-            onReorder: widget.ctrl.reorderQueue,
-            proxyDecorator: (child, index, animation) =>
-                Material(color: Colors.transparent, child: child),
-            itemBuilder: (_, i) {
-              final song = widget.ctrl.queue[i];
-              final isCurrent = i == currentIdx;
-              return ListTile(
-                key: ValueKey(song.path + i.toString()),
-                contentPadding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
-                leading: Container(
-                  width: 36,
-                  height: 36,
-                  decoration: BoxDecoration(
-                    color: isCurrent
-                        ? AppTheme.primary.withOpacity(0.2)
-                        : Colors.white.withOpacity(0.06),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: isCurrent && widget.ctrl.isPlaying.value
-                      ? const Icon(Icons.equalizer_rounded,
-                          color: AppTheme.primary, size: 16)
-                      : Center(
-                          child: Text('${i + 1}',
-                              style: TextStyle(
-                                  color: isCurrent
-                                      ? AppTheme.primary
-                                      : Colors.white30,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.bold))),
+          child: isShuffle
+              // In shuffle mode: plain ListView (shuffle order can't be manually reordered)
+              ? ListView.builder(
+                  controller: _scrollCtrl,
+                  itemCount: displayList.length,
+                  itemExtent: 68,
+                  itemBuilder: (_, i) {
+                    final entry = displayList[i];
+                    final isCurrent = i == 0 && ctrl.shuffleOrder.isNotEmpty;
+                    return _queueTile(
+                      song: entry.song,
+                      displayIndex: i,
+                      queueIdx: entry.queueIdx,
+                      isCurrent: isCurrent,
+                      isPlayed: entry.isPlayed,
+                      ctrl: ctrl,
+                    );
+                  },
+                )
+              // In normal mode: reorderable list
+              : ReorderableListView.builder(
+                  scrollController: _scrollCtrl,
+                  itemCount: displayList.length,
+                  onReorder: ctrl.reorderQueue,
+                  proxyDecorator: (child, _, __) =>
+                      Material(color: Colors.transparent, child: child),
+                  itemBuilder: (_, i) {
+                    final entry = displayList[i];
+                    final isCurrent = entry.queueIdx == currentQueueIdx;
+                    return _queueTile(
+                      key: ValueKey(entry.song.path + i.toString()),
+                      song: entry.song,
+                      displayIndex: i,
+                      queueIdx: entry.queueIdx,
+                      isCurrent: isCurrent,
+                      isPlayed: entry.isPlayed,
+                      ctrl: ctrl,
+                    );
+                  },
                 ),
-                title: Text(song.name,
-                    style: TextStyle(
-                        color: isCurrent ? AppTheme.primary : Colors.white,
-                        fontWeight:
-                            isCurrent ? FontWeight.bold : FontWeight.normal,
-                        fontSize: 13),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis),
-                subtitle: Text(song.ext.toUpperCase(),
-                    style:
-                        const TextStyle(color: Colors.white24, fontSize: 11)),
-                trailing: isCurrent
-                    ? const Icon(Icons.volume_up_rounded,
-                        color: AppTheme.primary, size: 16)
-                    : IconButton(
-                        icon: const Icon(Icons.close_rounded,
-                            color: Colors.white24, size: 18),
-                        onPressed: () => widget.ctrl.removeFromQueue(i),
-                        padding: EdgeInsets.zero,
-                      ),
-                onTap: () => widget.ctrl.playByQueueIndex(i),
-              );
-            },
-          ),
         ),
       ]);
     });
   }
+
+  Widget _queueTile({
+    Key? key,
+    required SongFile song,
+    required int displayIndex,
+    required int queueIdx,
+    required bool isCurrent,
+    required bool isPlayed,
+    required PlayerController ctrl,
+  }) {
+    return SizedBox(
+      key: key ?? ValueKey(song.path + displayIndex.toString()),
+      height: 68,
+      child: ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
+        leading: Container(
+          width: 36,
+          height: 36,
+          decoration: BoxDecoration(
+            color: isCurrent
+                ? AppTheme.primary.withOpacity(0.2)
+                : isPlayed
+                    ? Colors.white.withOpacity(0.03)
+                    : Colors.white.withOpacity(0.06),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: isCurrent && ctrl.isPlaying.value
+              ? const Icon(Icons.equalizer_rounded,
+                  color: AppTheme.primary, size: 16)
+              : Center(
+                  child: Text('${displayIndex + 1}',
+                      style: TextStyle(
+                          color: isCurrent
+                              ? AppTheme.primary
+                              : isPlayed
+                                  ? Colors.white12
+                                  : Colors.white30,
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold))),
+        ),
+        title: Text(song.name,
+            style: TextStyle(
+              color: isCurrent
+                  ? AppTheme.primary
+                  : isPlayed
+                      ? Colors.white24
+                      : Colors.white,
+              fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal,
+              fontSize: 13,
+            ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis),
+        subtitle: Text(song.ext.toUpperCase(),
+            style: TextStyle(
+                color: isPlayed ? Colors.white12 : Colors.white24,
+                fontSize: 11)),
+        trailing: isCurrent
+            ? const Icon(Icons.volume_up_rounded,
+                color: AppTheme.primary, size: 16)
+            : IconButton(
+                icon: const Icon(Icons.close_rounded,
+                    color: Colors.white24, size: 18),
+                onPressed: () => ctrl.removeFromQueue(queueIdx),
+                padding: EdgeInsets.zero,
+              ),
+        onTap: () => ctrl.playByQueueIndex(queueIdx),
+      ),
+    );
+  }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Edit metadata sheet
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Edit Metadata Sheet ──────────────────────────────────────────────────────
 
 class EditMetadataSheet extends StatefulWidget {
   final SongFile song;
@@ -1250,8 +1243,7 @@ class _EditMetadataSheetState extends State<EditMetadataSheet> {
 
   Future<void> _pickArt() async {
     try {
-      final picker = ImagePicker();
-      final xfile = await picker.pickImage(source: ImageSource.gallery);
+      final xfile = await ImagePicker().pickImage(source: ImageSource.gallery);
       if (xfile == null) return;
       final appDir = await getApplicationDocumentsDirectory();
       final dest = '${appDir.path}/art_${widget.song.path.hashCode.abs()}.jpg';
@@ -1267,7 +1259,7 @@ class _EditMetadataSheetState extends State<EditMetadataSheet> {
     setState(() => _saving = true);
     try {
       final svc = Get.find<MetadataService>();
-      final meta = SongMetadata(
+      await svc.save(SongMetadata(
         filePath: widget.song.path,
         customTitle:
             _titleCtrl.text.trim().isNotEmpty ? _titleCtrl.text.trim() : null,
@@ -1276,8 +1268,7 @@ class _EditMetadataSheetState extends State<EditMetadataSheet> {
         customAlbum:
             _albumCtrl.text.trim().isNotEmpty ? _albumCtrl.text.trim() : null,
         artImagePath: _artPath,
-      );
-      await svc.save(meta);
+      ));
       try {
         Get.find<PlayerController>().refreshCurrentSongNotification();
       } catch (_) {}
@@ -1292,9 +1283,8 @@ class _EditMetadataSheetState extends State<EditMetadataSheet> {
     final hasArt = _artPath != null && File(_artPath!).existsSync();
     return Container(
       decoration: const BoxDecoration(
-        color: AppTheme.surface,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
+          color: AppTheme.surface,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
       padding: EdgeInsets.only(
           bottom: MediaQuery.of(context).viewInsets.bottom + 16,
           left: 20,
@@ -1313,7 +1303,6 @@ class _EditMetadataSheetState extends State<EditMetadataSheet> {
                 fontWeight: FontWeight.bold,
                 fontSize: 16)),
         const SizedBox(height: 16),
-        // Art picker
         GestureDetector(
           onTap: _pickArt,
           child: Container(
@@ -1368,29 +1357,29 @@ class _EditMetadataSheetState extends State<EditMetadataSheet> {
     );
   }
 
-  Widget _field(TextEditingController controller, String label, String hint) {
-    return TextField(
-      controller: controller,
-      style: const TextStyle(color: Colors.white, fontSize: 14),
-      decoration: InputDecoration(
-        labelText: label,
-        labelStyle: const TextStyle(color: Colors.white54, fontSize: 13),
-        hintText: hint,
-        hintStyle: const TextStyle(color: Colors.white24, fontSize: 13),
-        filled: true,
-        fillColor: AppTheme.background,
-        border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(10),
-            borderSide: const BorderSide(color: Colors.white12)),
-        enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(10),
-            borderSide: const BorderSide(color: Colors.white12)),
-        focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(10),
-            borderSide: const BorderSide(color: AppTheme.primary, width: 1.5)),
-        contentPadding:
-            const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-      ),
-    );
-  }
+  Widget _field(TextEditingController c, String label, String hint) =>
+      TextField(
+        controller: c,
+        style: const TextStyle(color: Colors.white, fontSize: 14),
+        decoration: InputDecoration(
+          labelText: label,
+          labelStyle: const TextStyle(color: Colors.white54, fontSize: 13),
+          hintText: hint,
+          hintStyle: const TextStyle(color: Colors.white24, fontSize: 13),
+          filled: true,
+          fillColor: AppTheme.background,
+          border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: const BorderSide(color: Colors.white12)),
+          enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: const BorderSide(color: Colors.white12)),
+          focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide:
+                  const BorderSide(color: AppTheme.primary, width: 1.5)),
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        ),
+      );
 }
